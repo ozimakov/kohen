@@ -926,11 +926,14 @@ mode · sync history CR (`ConfigRelease`).
 
 ## 20. Relationship to the Existing Prototype
 
-The repository contains an early `kohen-agent` prototype (Go + `go-git`) that
-clones a repo into a directory via `--gitUrl`/`--gitPath`/`--targetDir` and
-matching env vars. It validates the git-fetch premise; its fetch logic maps to
-the operator's fetch/resolve step (S1.1 in PLAN). Its env-var interface is the
-seed for the deferred sidecar mode (§19).
+The repository previously contained an early `kohen-agent` prototype (Go +
+`go-git`) that cloned a repo into a directory via
+`--gitUrl`/`--gitPath`/`--targetDir` and matching env vars. It validated the
+git-fetch premise; its fetch logic maps to the operator's fetch/resolve step
+(S1.1 in PLAN) and its env-var interface is the seed for the deferred sidecar
+mode (§19). The prototype has now been removed (see git history) in favour of
+the clean-room operator implementation described in this SPEC and sequenced in
+PLAN.md; the git-source library (`internal/git`, S1.1) supersedes it.
 
 ---
 
