@@ -1,1 +1,15 @@
 .vscode
+.idea
+
+# Build output
+/bin/
+/dist/
+
+# Test / coverage artifacts
+coverage.out
+coverage.html
+*.test
+*.out
+
+# Local envtest assets
+/testbin/
