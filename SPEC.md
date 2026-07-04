@@ -1,6 +1,6 @@
 # KOHEN — Specification
 
-> Status: **Draft v0.1** · Owner: Kohen maintainers · Last updated: 2026-07-03
+> Status: **Draft v0.2** · Owner: Kohen maintainers · Last updated: 2026-07-04
 >
 > This document is the single source of truth for **what** Kohen is, **why** it
 > exists, and **which requirements** any implementation must satisfy. It is
@@ -13,36 +13,49 @@
 
 ## 1. Overview
 
-**Kohen** is a Kubernetes-native configuration management tool. It lets an
-application consume its runtime configuration from a **dedicated `git`
-repository** and keeps that configuration **consistently up to date** inside the
-running workload after any change is committed.
+**Kohen** delivers **configuration *file trees*** from a dedicated `git`
+repository into Kubernetes workloads that **read config from the filesystem and
+hot-reload it** — Envoy, NGINX, HAProxy, Fluent Bit / Fluentd / Vector,
+Prometheus / Alertmanager, Loki, Tempo, CoreDNS, Telegraf, and similar
+file-driven daemons. For those workloads Kohen delivers each new version
+**atomically**, drives a **reload**, and guarantees the **whole fleet converges
+to one committed config version** with per-replica proof of what is served.
 
-Kohen is **not** an alternative to GitOps solutions (Argo CD, Flux, etc.). GitOps
-tools reconcile *cluster and workload desired state* (Deployments, Services,
-CRDs). Kohen operates one level lower and to the side: it delivers the
-*application-level configuration files/values* that a running process reads,
-sourced from a config repository that may span **multiple environments**. Kohen
-can run alongside a GitOps stack, a Helm-only stack, or a plain
-`kubectl apply` stack without conflict.
+Kohen is deliberately **narrow**. It is *not* a general-purpose Kubernetes config
+manager, *not* a GitOps engine, and *not* a feature-flag system. It does one
+thing that today requires hand-built glue: get a directory of config files from
+git onto disk, consistently and atomically, and make a file-driven process pick
+it up — without a full redeploy and without the ~1 MiB / flat-key limits of a
+`ConfigMap`.
+
+> If your app reads config from **environment variables** or a single small
+> key/value map, and a pod restart on change is acceptable, **you do not need
+> Kohen** — use a `ConfigMap` plus [Stakater Reloader], or feature flags. See
+> §2.4 (*When NOT to use Kohen*). Kohen earns its place only for **file-tree +
+> hot-reload** workloads where atomicity and fleet consistency actually matter.
 
 ### 1.1 One-sentence definition
 
-> Kohen mounts configuration from a dedicated git repository into a Kubernetes
-> workload and guarantees that every replica converges to the same committed
-> configuration version, atomically, and reloads or restarts the application
-> when it changes.
+> Kohen atomically delivers a versioned directory of configuration files from a
+> dedicated git repository into file-driven Kubernetes workloads, guarantees the
+> whole fleet converges to the same committed version, and drives an in-place
+> reload — no redeploy, no `ConfigMap` size/shape limits.
 
-### 1.2 Elevator pitch
+### 1.2 The concrete scenario Kohen is built for
 
-Teams that operate many services across many environments frequently keep their
-"knobs" — feature flags, tuning parameters, routing tables, allow-lists,
-per-environment endpoints — in a dedicated configuration repository so that
-changes are reviewable, auditable, and decoupled from application release
-cycles. Getting that configuration *into* the workload, *consistently across
-replicas*, and *refreshed without a full redeploy* is today a bespoke,
-error-prone effort (init scripts, sidecars glued together, ConfigMap churn,
-manual restarts). Kohen makes this a first-class, declarative capability.
+A team runs a fleet of **Envoy** (or NGINX / Fluent Bit / Prometheus) pods. Their
+config is a **tree of files** — `envoy.yaml`, route tables, filter snippets, TLS
+material references — that is too large and too structured for a `ConfigMap`, and
+the process **hot-reloads** on `SIGHUP` or an admin endpoint. They keep this
+config in a **dedicated git repo** with `dev`/`staging`/`prod` variants so changes
+are reviewed and audited. Today they bolt together `git-sync` + a reload
+script + a ConfigMap hash annotation, and they still cannot answer *"is every
+replica actually on commit `abc123` right now?"* or guarantee a half-written tree
+is never read. **Kohen is the purpose-built answer to exactly this scenario.**
+
+Outside this scenario, Kohen is intentionally not the right tool.
+
+[Stakater Reloader]: https://github.com/stakater/Reloader
 
 ---
 
@@ -79,31 +92,70 @@ configuration spans environments:
 
 GitOps controllers reconcile Kubernetes API objects toward a git-declared
 desired state. They are excellent at *infrastructure and deployment* state. They
-are a poor fit for *fast-moving, fine-grained, application-owned configuration*
-because:
+are a poor fit for delivering a *file tree of application config to a file-driven
+daemon that hot-reloads* because:
 
 - Every config edit becomes a reconcile of Kubernetes objects and, typically, a
-  workload rollout — heavyweight for a feature-flag flip.
+  workload rollout — there is no in-place hot reload of the running process.
 - The application still cannot pull a specific config directory tree from a
   dedicated repo into its own filesystem with atomic swaps.
-- GitOps does not provide an application-facing reload contract.
+- GitOps does not provide an application-facing reload contract, and config
+  larger than a `ConfigMap` still has nowhere to go.
 
 Kohen is **complementary**: use GitOps for what runs, use Kohen for what running
 things read.
 
 ### 2.3 Prior art / positioning
 
-| Approach | What it does | Gap Kohen fills |
+| Approach | What it does | Why it is not enough *for the file-tree + hot-reload case* |
 | --- | --- | --- |
-| `ConfigMap`/`Secret` volumes | Native k8s config units | No git source of truth, no reload signal, weak consistency, size limits |
-| GitOps (Argo CD, Flux) | Reconcile cluster desired state from git | Heavyweight for app config; no in-container file delivery + reload |
-| Spring Cloud Config / Consul / Vault | Config server apps query at runtime | Requires a running service + client libraries; not git-file-native or k8s-native by default |
-| `git-sync` sidecar | Syncs a git repo into a volume | No environment model, no consistency guarantee across replicas, no reload contract, minimal k8s integration |
-| Bespoke init scripts | Clone config at startup | One-shot only; no live updates; per-team reinvention |
+| `ConfigMap`/`Secret` volumes | Native k8s config units | ~1 MiB + flat-key limits; awkward for a directory tree; no git source of truth; no reload signal; kubelet-sync updates are not atomic per-tree and give no cross-replica version |
+| Stakater **Reloader** | Restarts pods when a `ConfigMap`/`Secret` changes | Restart-based only (no *hot* reload); still bounded by ConfigMap limits; no git source of truth; no atomic file-tree swap |
+| **`git-sync`** sidecar | Syncs a git repo into a volume | No environment model, no fleet consistency guarantee, no reload contract, minimal k8s integration — you still build the reload + version-tracking glue yourself |
+| GitOps (Argo CD, Flux) | Reconcile cluster desired state from git | Heavyweight for app config; no in-container file-tree delivery + hot-reload; a config edit becomes an object reconcile/rollout |
+| Feature-flag platforms (LaunchDarkly, Unleash, Flagsmith, OpenFeature) | Runtime toggles/values via SDK | Requires app code changes + a client library; not for delivering *config files* to off-the-shelf daemons (Envoy/NGINX/Fluent Bit) |
+| Spring Cloud Config / Consul / Vault | Config server apps query at runtime | Requires a running service + client library; not git-file-native or k8s-file-native by default |
+| Bespoke init scripts | Clone config at startup | One-shot only; no live updates; no atomicity/consistency; per-team reinvention |
 
-Kohen's distinguishing combination: **git-native + multi-environment model +
-atomic file delivery + application reload contract + fleet-wide consistency +
-declarative Kubernetes integration.**
+Kohen's distinguishing combination, **scoped to file-driven, hot-reloadable
+workloads**: git-native delivery of a **whole directory tree** + **atomic swap** +
+an **application reload contract** + **fleet-wide version consistency** with
+per-replica proof + declarative Kubernetes integration. No single tool above
+provides that combination; Kohen exists to avoid gluing three of them together.
+
+### 2.4 When NOT to use Kohen (and what to use instead)
+
+Kohen is intentionally narrow. Reach for something else when:
+
+- **Your app reads config from environment variables.** Env vars cannot change in
+  a running process. Use a `ConfigMap`/`Secret` + **Reloader** (restart on
+  change), or move the value behind a feature flag. Kohen will **not** inject env
+  vars in v1 (N6).
+- **Your config is a handful of small key/value settings and a restart on change
+  is fine.** A `ConfigMap` (optionally + Reloader) is simpler and has no per-pod
+  footprint. Don't add a sidecar for this.
+- **You want to toggle product behavior / run experiments.** Use a feature-flag
+  platform (OpenFeature-compatible). That space is solved and SDK-driven.
+- **You want to deploy/reconcile Kubernetes objects from git.** That's GitOps
+  (Argo CD / Flux). Kohen delivers what running things *read*, not what runs.
+- **You need a secrets manager.** Use External Secrets Operator / Vault / Sealed
+  Secrets. Kohen *references* secrets those tools manage (see §9A) but does not
+  store or manage secret material itself.
+
+Kohen is the right tool when **all** of these hold:
+
+1. The workload reads configuration from the **filesystem** (a file or a
+   directory tree), not solely from env vars.
+2. The workload can **reload in place** (signal, admin endpoint, or built-in file
+   watch) — or you explicitly accept the rollout contract (C4) for it.
+3. The config is genuinely **file-tree shaped** and/or **exceeds `ConfigMap`
+   practicality** (size, nesting, many files), and/or you need **atomic swaps**
+   and **provable fleet-wide version consistency**.
+4. The source of truth is a **dedicated git repo**, ideally spanning multiple
+   environments.
+
+If two or more of these are false, Kohen is probably the wrong tool, and the
+README/docs MUST say so plainly (NFR6).
 
 ---
 
@@ -111,32 +163,39 @@ declarative Kubernetes integration.**
 
 ### 3.1 Goals
 
-- **G1** Deliver configuration from a dedicated git repository into a Kubernetes
-  workload as files on a filesystem the application already reads.
+- **G1** Deliver a **directory tree** of configuration from a dedicated git
+  repository onto the filesystem of a **file-driven, reload-capable** Kubernetes
+  workload, free of `ConfigMap` size/shape limits.
 - **G2** Support a **multi-environment** repository model (dev/staging/prod, and
   optionally region/tenant) selected declaratively per workload.
 - **G3** Keep configuration **current**: detect committed changes and apply them
   to running workloads without requiring a manual redeploy.
 - **G4** Guarantee **consistency**: updates are atomic per replica (no partially
-  written config is ever visible) and the fleet converges to a single named
-  config version.
-- **G5** Provide a clear **application reload contract** (file watch, signal, or
-  controlled rollout) so apps actually pick up changes.
+  written config tree is ever visible) and the fleet converges to a single named
+  config version with per-replica proof of the served version.
+- **G5** Provide a clear **application reload contract** (in-place file watch,
+  signal, admin endpoint/exec hook, or controlled rollout) so apps actually pick
+  up changes — with in-place reload as the primary, first-class path.
 - **G6** Be **Kubernetes-native**: declarative API (CRDs), optional automatic
   injection, standard RBAC, metrics, and events.
-- **G7** Be **secure by default**: least-privilege git access, secret handling,
-  and optional commit verification.
+- **G7** Be **secure by default**: least-privilege git access, first-class
+  **secret *references*** resolved from native `Secret`s or External Secrets
+  (§9A) so plaintext secrets never live in the config repo, and optional commit
+  verification.
 - **G8** Be **operable**: observable, debuggable, and safe to fail (a config
   backend outage must not take down healthy workloads).
+- **G9** Keep the **adoption cost low**: an operator-driven path with **no
+  per-pod sidecar** MUST exist so Kohen can compete with sidecar-free tools; the
+  sidecar is opt-in for the hot-reload case (§6, §10).
 
 ### 3.2 Non-Goals
 
 - **N1** Kohen is **not** a GitOps/CD engine and will not reconcile arbitrary
   Kubernetes manifests or perform application deployments.
-- **N2** Kohen is **not** a general-purpose secrets manager. It integrates with
-  existing secret stores but does not aim to replace Vault/Sealed
-  Secrets/External Secrets. (It MAY deliver secret *material* referenced from the
-  config repo; see §9.)
+- **N2** Kohen is **not** a general-purpose secrets manager and does **not** store
+  or manage secret material. It **resolves references** to secrets owned by
+  native `Secret`s or External Secrets Operator / Vault / Sealed Secrets (§9A); it
+  does not replace them.
 - **N3** Kohen does **not** own the *schema* or *validation semantics* of an
   application's configuration beyond optional structural checks; the application
   remains responsible for interpreting its config.
@@ -144,6 +203,15 @@ declarative Kubernetes integration.**
   Helm/Kustomize. Light templating MAY be supported (§7.4) but complex
   rendering pipelines are out of scope for v1.
 - **N5** Kohen does not provide a UI in v1 (CLI + Kubernetes API only).
+- **N6** Kohen does **not** deliver configuration as **environment variables** in
+  v1. Env vars cannot update in a running process and are the domain of
+  `ConfigMap`/`Secret` + restart tooling. Kohen targets filesystem config only
+  (§2.4). Env-var use cases are steered to the rollout contract (C4) or out of
+  scope.
+- **N7** Kohen is **not** a general-purpose config manager for arbitrary apps.
+  Apps that cannot read config from files or cannot reload are explicitly out of
+  Kohen's sweet spot and are served (if at all) only by the coarse rollout
+  contract (C4).
 
 ---
 
@@ -151,22 +219,28 @@ declarative Kubernetes integration.**
 
 ### 4.1 Personas
 
-- **Application developer (Dana).** Owns a service. Wants to change a feature
-  flag or tuning value by opening a PR against the config repo and have it take
-  effect in the target environment without cutting a new release.
+- **Data-plane / infra service owner (Dana).** Owns a fleet of file-driven
+  daemons (e.g. Envoy edge proxies, NGINX gateways, Fluent Bit log shippers,
+  Prometheus/Alertmanager). Wants to change a routing table, filter, scrape
+  config, or pipeline by opening a PR against the config repo and have every
+  replica hot-reload the new version without a redeploy — and be able to prove
+  the whole fleet converged.
 - **Platform / SRE engineer (Sam).** Operates the cluster. Wants a standard,
-  auditable, secure mechanism for config delivery, with metrics and safe failure
-  modes, that they can offer as a self-service capability.
+  auditable, secure, low-footprint mechanism for delivering config file trees,
+  with metrics and safe failure modes, offered as a self-service capability —
+  without adding a heavy sidecar to every pod in the cluster.
 - **Security / compliance reviewer (Riley).** Wants config changes to be
-  reviewed, attributable to a commit/author, verifiable (signed), and access to
-  the config repo to be least-privilege.
+  reviewed, attributable to a commit/author, verifiable (signed), access to the
+  config repo to be least-privilege, and **no plaintext secrets in the config
+  repo** — secrets must be *references* resolved from an approved secret store.
 
 ### 4.2 Primary use cases
 
-- **UC1 — Startup delivery.** On pod start, the correct environment's config is
-  present on disk before the application's main container starts.
-- **UC2 — Live update, hot reload.** A merged config change is delivered to
-  running pods and the application reloads it without a restart.
+- **UC1 — Startup delivery.** On pod start, the correct environment's config tree
+  is present on disk before the application's main container starts.
+- **UC2 — Live update, hot reload (primary).** A merged config change is delivered
+  to running pods and the file-driven application reloads the new tree in place
+  without a restart.
 - **UC3 — Live update, controlled rollout.** For applications that cannot hot
   reload, a config change triggers a safe rolling restart pinned to a single
   config version.
@@ -177,6 +251,10 @@ declarative Kubernetes integration.**
   rolls the fleet back to a known-good configuration version.
 - **UC6 — Audit.** Given a running workload, an operator can determine exactly
   which config commit each replica is serving.
+- **UC7 — Secret references.** A config file references a secret (e.g. an upstream
+  credential or TLS key) by name; Kohen resolves it from a native `Secret` or via
+  External Secrets and materializes the secret material into the workload —
+  without the plaintext ever being committed to the config repo (§9A).
 
 ---
 
@@ -200,6 +278,13 @@ declarative Kubernetes integration.**
 - **Reload contract:** The agreed mechanism by which the application picks up a
   new config version (file watch, signal, endpoint, or rollout).
 - **Consistency target:** The named config version the fleet should converge to.
+- **Secret reference:** A pointer, stored in the config (never the value), to
+  secret material owned by a native `Secret` or an external secret tool, which
+  Kohen resolves inside the cluster at materialization time (§9A).
+- **`SecretMapping`:** The declarative mapping of secret references to sources and
+  projection targets, declared in-repo or in the `ConfigBinding` (§9A.3).
+- **File-driven workload:** An application/daemon that reads its configuration
+  from files on disk and can reload it in place (Kohen's primary target).
 
 ---
 
@@ -265,6 +350,29 @@ Kohen has two cooperating components plus a well-defined repository model.
 
 > The operator is OPTIONAL for basic file-delivery use cases but REQUIRED for
 > fleet-wide consistency coordination, auto-injection, and webhook-driven syncs.
+
+### 6.3 Deployment topologies
+
+Kohen MUST support two topologies so adoption cost matches the use case (G9):
+
+- **Topology A — In-pod agent (primary; for hot-reload + large trees).** Init +
+  sidecar `kohen-agent` deliver the config tree to a shared volume and drive an
+  **in-place reload** (C1–C3). This is the only topology that can hot-reload a
+  file-driven daemon without a restart, and it is unconstrained by `ConfigMap`
+  size/shape limits. It carries a per-pod footprint (T6), justified precisely
+  because no sidecar-free tool can do in-place file-tree reload.
+- **Topology B — Operator-projected, sidecar-free (low footprint; for the
+  rollout contract).** The operator fetches, resolves (including secret
+  references, §9A), and **projects** the resolved config into the pod via a
+  Kubernetes object (e.g. a generated `ConfigMap`/`Secret` mounted as a volume),
+  then drives a version-pinned rolling restart (C4). No per-pod agent runs. This
+  competes with `ConfigMap` + Reloader on adoption cost, adds the git source of
+  truth + multi-environment model + fleet consistency, but inherits `ConfigMap`
+  limits and cannot hot-reload.
+
+Selection MUST be explicit per binding. The reload contract (§10) determines the
+required topology: C1–C3 imply Topology A; C4 MAY use either but defaults to
+Topology B.
 
 ---
 
@@ -400,6 +508,139 @@ This is the core differentiator and MUST be specified precisely.
 
 ---
 
+## 9A. Secret References
+
+The config repo is plaintext and reviewable, so it MUST NOT contain secret
+values. Yet real config (Envoy upstreams, NGINX TLS, Fluent Bit outputs,
+Prometheus remote-write) needs credentials and keys. Kohen therefore supports
+**secret *references***: the git-tracked config points at a secret **by name**,
+and Kohen resolves the actual material **inside the cluster** at materialization
+time from a secret source Kohen does not own.
+
+### 9A.1 Principles
+
+- **P1 — No plaintext secrets in git.** Kohen MUST NOT require, expect, or read
+  secret *values* from the config repo. Only *references* live in git.
+- **P2 — Kohen is a consumer, not a store (N2).** Kohen resolves references
+  against secret material that already exists in (or is provisioned into) the
+  cluster. It does not encrypt, decrypt, rotate, or persist secret material of its
+  own.
+- **P3 — Native `Secret` is the common substrate.** Whatever the upstream store
+  (native `Secret`, External Secrets Operator, Vault, Sealed Secrets, CSI
+  drivers), Kohen resolves through the **Kubernetes `Secret`** those tools
+  materialize. This gives one integration seam and inherits Kubernetes RBAC and
+  encryption-at-rest. External Secrets support is therefore "resolve the `Secret`
+  that ESO syncs", not a re-implementation of ESO.
+
+### 9A.2 Supported secret sources
+
+- **S1 — Native `Secret`.** Reference an existing `Secret` (name + key) in the
+  workload's namespace.
+- **S2 — External Secrets Operator (ESO).** Reference an `ExternalSecret` (or its
+  target `Secret`). Kohen resolves the target `Secret` and MAY wait for the
+  `ExternalSecret` to report `Ready` before materializing (R9A.6). Kohen does not
+  talk to the external provider directly.
+- **S3 — Any tool that produces a native `Secret`.** Sealed Secrets, Vault
+  agent/CSI (already materialized), cert-manager-issued TLS `Secret`s, etc. are
+  all consumed via S1 semantics.
+
+Cross-namespace references are **disallowed by default** and MUST require explicit
+operator-level allow-listing when enabled (multi-tenancy, R9.9).
+
+### 9A.3 How a reference is declared
+
+References are declared **declaratively**, not by scanning arbitrary config file
+formats (format-agnostic and robust). Two equivalent declaration sites are
+supported; both produce the same behavior:
+
+1. **In-repo (`kohen.secrets.yaml`, recommended)** — lives beside the config in
+   the git path, so the config author owns it and it is reviewed with the config:
+
+   ```yaml
+   # services/edge-proxy/prod/kohen.secrets.yaml
+   apiVersion: kohen.dev/v1alpha1
+   kind: SecretMapping
+   secrets:
+     - name: upstream-api-token          # logical name used by the config
+       from:                             # exactly one source
+         nativeSecret: { name: edge-upstream, key: token }
+       project:
+         mode: file                      # file | inline
+         path: secrets/upstream_token    # relative to the mount root
+         fileMode: "0400"
+     - name: tls-key
+       from:
+         externalSecret: { name: edge-tls }   # ESO-managed; key defaults by convention
+       project:
+         mode: file
+         path: secrets/tls/server.key
+         fileMode: "0400"
+   ```
+
+2. **In the `ConfigBinding`** — the same list under `spec.secretRefs` (see §11.2),
+   for cases where the config repo is read-only to the consumer or the platform
+   team wants to own the mapping. If both are present, the operator MUST reject
+   conflicting definitions rather than silently merge (R9A.7).
+
+### 9A.4 Projection modes
+
+- **M-file (default, preferred).** Each referenced secret is materialized as a
+  **file** at the declared path within the config mount, on a **memory-backed**
+  volume. The git-tracked config references it **by path** (e.g. Envoy SDS from
+  file, NGINX `ssl_certificate_key /etc/appconfig/secrets/tls/server.key`). This
+  keeps secret values out of every config file and is the least-exposure option.
+- **M-inline (opt-in).** When light templating (§7.4) is enabled, a config file
+  MAY contain a reference such as `{{ secret "upstream-api-token" }}` that Kohen
+  substitutes during rendering. The rendered output containing the value MUST be
+  written **only** to a memory-backed volume, MUST be excluded from any on-disk
+  cache, and MUST NOT be logged or included in diffs (§16.2 `kohenctl diff` MUST
+  redact). Inline mode is more convenient for daemons that only accept inline
+  secrets but has a larger exposure surface; it is therefore explicit opt-in.
+
+### 9A.5 Delivery per topology
+
+- **Topology A (in-pod agent).** Referenced `Secret`s are mounted into the agent
+  via **standard Kubernetes secret volumes** (declared by injection/the
+  operator). The agent composes them into the config tree as part of the same
+  **atomic swap** (§8) — it does not need Kubernetes API `get` on Secrets, so the
+  sidecar keeps minimal RBAC. Kubelet remains the secret delivery mechanism.
+- **Topology B (operator projection).** The operator resolves references and
+  emits a generated, memory-mountable `Secret`/projected volume for the workload,
+  then drives a version-pinned rollout (C4) on change.
+
+### 9A.6 Consistency, rotation & versioning
+
+- **R9A.1** A referenced secret that is missing/incomplete/not-`Ready` MUST cause
+  the sync to **fail closed**: do not swap to a config version with unresolved
+  references; keep last-good; mark `Degraded`; emit an event (§13).
+- **R9A.2** The **config version** (§8.3) MUST incorporate a **salted hash** of
+  the resolved secret material (never the material itself) so that a **secret
+  rotation triggers the reload/rollout contract** just like a git change. This
+  gives file-driven daemons automatic reload on cert/credential rotation.
+- **R9A.3** Materialization of secrets MUST be **atomic** together with the
+  config tree (no window where config points at a not-yet-written secret file).
+
+### 9A.7 Security requirements (secret references)
+
+- **R9A.4** Secret material MUST only ever be written to **memory-backed** volumes
+  (`emptyDir` `medium: Memory` / `tmpfs`), with restrictive file permissions
+  (default `0400`) and correct ownership for the app UID/`fsGroup`.
+- **R9A.5** Secret values MUST NEVER appear in logs, events, metrics, CRD status,
+  traces, or `kohenctl` output; only presence/absence and hashed version markers
+  are exposed.
+- **R9A.6** RBAC for reading `Secret`s MUST be least-privilege and namespaced. In
+  Topology A the sidecar SHOULD avoid Secret API access entirely by relying on
+  kubelet-mounted secret volumes; in Topology B the operator's Secret access MUST
+  be scoped (ideally per-namespace, resourceNames-limited where feasible).
+- **R9A.7** Conflicting or ambiguous secret mappings (duplicate logical names,
+  both in-repo and binding definitions disagreeing) MUST be rejected at
+  reconcile/validation time, not resolved silently.
+- **R9A.8** ESO/Vault remain the source of truth and rotation authority; Kohen
+  MUST NOT extend secret lifetime beyond what the source provides and MUST
+  re-resolve on the source `Secret`'s change (watch-driven).
+
+---
+
 ## 10. Application Reload Contract
 
 Applications differ in how they can absorb config changes; Kohen MUST support a
@@ -492,8 +733,18 @@ spec:
   overlay:                                    # optional (§7.4)
     enabled: true
     baseDir: services/checkout/base
+  secretRefs:                                 # optional (§9A); may instead live in-repo as SecretMapping
+    - name: upstream-api-token
+      from: { nativeSecret: { name: edge-upstream, key: token } }
+      project: { mode: file, path: secrets/upstream_token, fileMode: "0400" }
+    - name: tls-key
+      from: { externalSecret: { name: edge-tls } }   # ESO-managed target Secret
+      project: { mode: file, path: secrets/tls/server.key, fileMode: "0400" }
 status:
-  targetVersion: 9f1c2ab                      # consistency target (R8.4)
+  targetVersion: 9f1c2ab                      # consistency target (R8.4); includes resolved-secret hash (R9A.2)
+  secretRefs:                                 # resolution status only — never values (R9A.5)
+    - name: upstream-api-token  resolved: true  source: nativeSecret
+    - name: tls-key             resolved: true  source: externalSecret
   observedReplicas:                           # per-replica observed version (R8.5)
     - pod: checkout-abc  version: 9f1c2ab
     - pod: checkout-def  version: 9f1c2ab
@@ -514,6 +765,10 @@ Requirements:
   never global-by-default.
 - **R11.4** Deleting a `ConfigBinding` MUST NOT delete application workloads; it
   stops syncing and (for injected setups) reverts injection on next rollout.
+- **R11.5** Secret references MAY be declared in the `ConfigBinding`
+  (`spec.secretRefs`) or in-repo (`SecretMapping`, §9A.3); the CRD schema for both
+  MUST be identical, and conflicts MUST be rejected (R9A.7). CRD status MUST
+  report per-reference resolution state without exposing values (R9A.5).
 
 ---
 
@@ -567,6 +822,8 @@ Requirements:
 | Auth failure | Fail fast with actionable error; emit event; MUST NOT retry so aggressively as to lock the account. Redact secrets from logs. |
 | Malformed / missing config path | Do not swap to a bad version. Keep last-good, mark degraded, emit event. |
 | Overlay/template error | Same as malformed path: no swap, degraded, event. |
+| Secret reference unresolved (missing `Secret`/key, ESO not `Ready`) | **Fail closed** (R9A.1): do not swap; keep last-good; mark `Degraded`; emit event; never log the value. |
+| Referenced secret rotates | Re-resolve (watch-driven, R9A.8); resolved-secret hash changes the config version (R9A.2) and drives the reload/rollout contract like a git change. |
 | Reload hook/signal failure | Config on disk stays at new version (already swapped); report failure per R10.3/R10.4; apply configured failure policy. |
 | Signature verification failure (R9.5) | Version MUST NOT become a consistency target; emit security event. |
 | Operator down | Existing pinned targets keep being served by agents; no new targets are published until operator recovers. Agents MUST degrade gracefully, not thrash. |
@@ -583,10 +840,12 @@ Requirements:
 - **R14.1 — Metrics.** Both components MUST expose Prometheus metrics, including
   at minimum: sync attempts/successes/failures, sync duration, current served
   config version (as a labeled gauge/info metric), reload attempts/outcomes,
-  fleet convergence (targeted vs observed), git fetch latency/errors, and
-  degraded-state gauges.
+  fleet convergence (targeted vs observed), git fetch latency/errors,
+  secret-reference resolution successes/failures (count only, never values;
+  R9A.5), and degraded-state gauges.
 - **R14.2 — Logging.** Structured (JSON) logging with configurable levels.
-  Secrets MUST never be logged (R9.6).
+  Secret values MUST never be logged, and secret-reference material MUST be
+  redacted everywhere (R9.6, R9A.5).
 - **R14.3 — Health.** The agent MUST expose readiness/liveness endpoints.
   Readiness MUST reflect "has a valid config version materialized"; liveness MUST
   NOT flap due to git backend outages (T8).
@@ -651,6 +910,8 @@ Requirements:
 | `--reload-signal` | `KOHEN_RELOAD_SIGNAL` | `SIGHUP` | Signal for `signal` mode. |
 | `--reload-target` | `KOHEN_RELOAD_TARGET` | — | Endpoint/command for `http`/`exec` mode. |
 | `--auth-*` | `KOHEN_AUTH_*` | — | Credential source (mounted secret path/token). |
+| `--secret-map` | `KOHEN_SECRET_MAP` | `""` | Path to the resolved `SecretMapping` (§9A) the agent composes into the tree. |
+| `--secret-mount` | `KOHEN_SECRET_MOUNT` | `""` | Root of kubelet-mounted referenced `Secret`s (Topology A source, §9A.5). |
 | `--metrics-addr` | `KOHEN_METRICS_ADDR` | `:9095` | Metrics/health bind address. |
 | `--verify-signed` | `KOHEN_VERIFY_SIGNED` | `false` | Require verified signed commits. |
 
@@ -662,7 +923,8 @@ Requirements:
 ### 16.2 `kohenctl` (optional helper CLI, SHOULD)
 
 - `kohenctl status <binding>` — show target vs observed versions (UC6).
-- `kohenctl diff <binding>` — show config diff between served and latest version.
+- `kohenctl diff <binding>` — show config diff between served and latest version
+  (secret-referenced material MUST be redacted, R9A.5).
 - `kohenctl pin <binding> <sha>` / `kohenctl rollback <binding>` — set target
   (UC5).
 - `kohenctl verify <repo>` — validate signatures / layout locally.
@@ -676,20 +938,29 @@ shippable and testable.
 
 - **M0 — Spec & foundations (this document).** Agreed requirements, glossary,
   architecture. Repo scaffolding, license, CI skeleton.
-- **M1 — Agent MVP (standalone).** `kohen-agent` init + sidecar modes, atomic
-  swap (R8.1–R8.3), HTTPS/SSH auth from secrets (R9.1–R9.4), file-watch + signal
-  reload contracts (C1, C2), metrics/health (§14), fail-safe behavior (T8, §13).
-  Delivers UC1, UC2 without the operator.
+- **M1 — Agent MVP (standalone), file-tree focus.** `kohen-agent` init + sidecar
+  modes, atomic swap of a **directory tree** (R8.1–R8.3), HTTPS/SSH auth from
+  secrets (R9.1–R9.4), file-watch + signal reload contracts (C1, C2),
+  metrics/health (§14), fail-safe behavior (T8, §13). Delivers UC1, UC2 (Topology
+  A) without the operator — validated against a real file-driven daemon
+  (Envoy/NGINX/Fluent Bit).
 - **M2 — Operator & CRDs.** `ConfigSource` + `ConfigBinding`, ref→commit
   resolution and consistency target publication (R8.4–R8.5), status/events,
-  Helm chart. Delivers fleet consistency, UC4, UC6.
-- **M3 — Reload completeness & rollout.** HTTP/exec hooks (C3), rollout contract
+  Helm chart, and the sidecar-free **Topology B** projection path (G9). Delivers
+  fleet consistency, UC4, UC6.
+- **M3 — Secret references (§9A).** `SecretMapping` (in-repo + `spec.secretRefs`),
+  native `Secret` (S1) and External Secrets (S2) resolution, file projection mode
+  (M-file) on memory-backed volumes, fail-closed + rotation-triggered reload
+  (R9A.1–R9A.8), redaction everywhere. Delivers UC7. (Inline mode M-inline
+  deferred to M6 with templating.)
+- **M4 — Reload completeness & rollout.** HTTP/exec hooks (C3), rollout contract
   (C4) with version-pinned restarts, rollback (UC5, R8.7).
-- **M4 — Injection & webhooks.** Mutating webhook auto-injection (R11.3),
+- **M5 — Injection & webhooks.** Mutating webhook auto-injection (R11.3),
   git-provider webhook-triggered syncs (R9.10), `kohenctl`.
-- **M5 — Advanced.** Overlays/light templating (§7.4), signed-commit verification
-  (R9.5), repo policy enforcement (§7.5), progressive rollout strategies (R8.6),
-  tracing (R14.6), image signing/SBOM (R9.8).
+- **M6 — Advanced.** Overlays/light templating + inline secret substitution
+  (§7.4, M-inline), signed-commit verification (R9.5), repo policy enforcement
+  (§7.5), progressive rollout strategies (R8.6), tracing (R14.6), image
+  signing/SBOM (R9.8).
 
 ---
 
@@ -712,6 +983,14 @@ shippable and testable.
 - **A7** The agent runs as non-root on a read-only root filesystem within the
   documented resource footprint (T6, T7).
 - **A8** No secret values appear in logs under any tested failure mode (R9.6).
+- **A9** A config file that references a secret (native `Secret` and an
+  ESO-managed target `Secret`) has the material projected as a file on a
+  memory-backed volume with mode `0400`, and the plaintext never appears in git,
+  logs, events, status, or `kohenctl` output (§9A, R9A.4–R9A.5).
+- **A10** An unresolved secret reference fails closed — the workload keeps its
+  last-good config, is marked `Degraded`, and emits an event (R9A.1); rotating the
+  referenced secret changes the config version and drives the reload/rollout
+  contract automatically (R9A.2), verified in an e2e test.
 
 ---
 
@@ -724,17 +1003,26 @@ shippable and testable.
 2. **Consistency coordination transport.** Publish the consistency target via a
    dedicated `ConfigRelease` CRD, `ConfigBinding` status, or a projected
    in-cluster artifact the agent reads? Impacts operator↔agent coupling.
-3. **Env-var-sourced config.** Some apps only read env vars, which cannot live
-   update. Do we officially scope such apps to the rollout contract (C4) only, or
-   provide an env-injection shim?
-4. **Overlay engine scope.** How much merge/templating is "light enough" to stay
-   within non-goal N4 while being genuinely useful?
-5. **Multi-repo bindings.** Should a single workload be able to compose config
+3. **Overlay engine scope.** How much merge/templating is "light enough" to stay
+   within non-goal N4 while being genuinely useful? (Also gates inline secret
+   substitution M-inline, §9A.4.)
+4. **Multi-repo bindings.** Should a single workload be able to compose config
    from more than one `ConfigSource`? If so, define precedence/merge order.
-6. **Secret delivery boundary.** Exactly where does Kohen stop and
-   External-Secrets/Vault begin (N2)? Define the supported integration seam.
-7. **Webhook ingress topology.** For webhook-driven syncs, what is the supported
+5. **Webhook ingress topology.** For webhook-driven syncs, what is the supported
    ingress/relay model in restricted-egress clusters?
+6. **Secret access path in Topology A.** §9A.5 prefers kubelet-mounted secret
+   volumes (no sidecar Secret API access), but that requires the operator/webhook
+   to know the referenced `Secret`s at injection time. Is a fallback where the
+   agent reads Secrets via a tightly-scoped (`resourceNames`) RBAC role
+   acceptable for dynamically-discovered references, or must all references be
+   resolvable at admission time?
+7. **ESO readiness coupling.** Should Kohen hard-block materialization until an
+   `ExternalSecret` reports `Ready` (safer, but couples startup to ESO health), or
+   proceed with the last-known target `Secret` if present (more available)?
+   (Relates to R9A.1 vs. NFR1.)
+8. **Env-var-sourced config (resolved as N6).** Confirmed out of scope for v1;
+   such apps are steered to the rollout contract (C4). Revisit only if strong
+   demand emerges.
 
 ---
 
