@@ -10,3 +10,7 @@ applications consume configuration from dedicated `git` repository and consisten
 The project is being revived starting from a clean specification. See
 [`SPEC.md`](./SPEC.md) for the full set of technical and non-technical
 requirements, the architecture, the consistency model, and the phased roadmap.
+
+The implementation sequence toward **v1.0** — broken into independently
+buildable steps (each with its own tests) plus dedicated `kind`-based usability
+milestones — is in [`PLAN.md`](./PLAN.md).
