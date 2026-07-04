@@ -81,7 +81,7 @@
 ## Dependency graph (high level)
 
 ```
-Phase 0  Foundations        S0.1 → S0.2 → S0.3
+Phase 0  Foundations        S0.1 → (S0.2 ∥ S0.3)
 Phase 1  Config-only        S1.1 ─┐
          operator (MVP)     S1.2 ─┤
                             S1.3 ─┼→ S1.4 → S1.5 → S1.6 → S1.7 → S1.8  ──►  [U1]
@@ -446,8 +446,8 @@ Delivers UC2/UC3 with the two v1 backends (ESO primary, native `Secret`).
   4. **Rotation:** rotate an env-surfaced secret → version advances → exactly
      one rollout; rotate a file-surfaced secret → in-place update, **no**
      rollout (A6).
-  5. **Native backend:** pre-existing `Secret` referenced and wired (A6
-     foundations; Tier 2 covered it — one kind smoke here).
+  5. **Native backend:** pre-existing `Secret` referenced and wired (Tier 2
+     covered the mechanics — one kind smoke here).
   6. **Abuse cases (A11):** `ConfigSync` with a disallowed `source.url` fails
      closed; unlabeled `authSecretRef` rejected; committed manifest with a
      non-allow-listed kind or store rejected; second `ConfigSync` on the same
@@ -495,7 +495,9 @@ Delivers UC2/UC3 with the two v1 backends (ESO primary, native `Secret`).
 - **SPEC refs:** NFR6, NFR7, §15, §11.4.
 
 ### S3.3 — Release engineering
-- **Depends on:** S0.1; final gate needs S3.1/S3.2. *Parallelizable.*
+- **Depends on:** S0.1 (pipeline scaffolding may start early); **U2** for the
+  A12 upgrade/uninstall verification; final gate needs S3.1/S3.2.
+  *Parallelizable.*
 - **Goal:** Repeatable, trustworthy releases.
 - **Scope (in):** Versioned Helm chart + manifest bundles; SemVer release
   automation (tags → images + chart publish); CRD upgrade policy documented

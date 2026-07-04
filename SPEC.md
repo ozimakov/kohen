@@ -286,8 +286,9 @@ such.
   `git:<source-commit>` extended with `sec:<secret-version-hash>` **only when
   env-surfaced secrets exist** (§9). Stamped on the workload and shown as
   `configVersion` in status.
-- **Version stamp:** annotation `kohen.dev/config-sha` on the target workload's
-  pod-template metadata (fixed name, not configurable in v1).
+- **Version stamp:** annotation `kohen.dev/config-sha` (fixed name, not
+  configurable in v1) on the target workload's pod-template metadata — or on
+  the workload object's metadata when `rollout: none` (R-VERSION).
 - **Secret reference:** a pointer in `ConfigSync.spec.secretRefs` (never a
   value) to secret material owned by a supported backend; Kohen **resolves** it
   and wires it into the pod.
@@ -565,20 +566,25 @@ the v1 fail-closed contract (R8.9).
   (eventually consistent within the kubelet sync period; `subPath` excluded,
   §1.3).
 - **R-CONS.** The operator resolves the ref to a **single commit** per
-  reconcile and produces all objects from it. The **config version** is:
-  `git:<sourceCommit>` + (`sec:<hash of env-surfaced secret version tokens>`
-  when any secret is env-surfaced). File-surfaced secret rotation does **not**
-  change the config version (R8.5) — kubelet delivers it in place.
+  reconcile and produces all objects from it. The **config version** is the
+  string `git:<short-sourceCommit>`, extended to
+  `git:<short-sourceCommit>-sec:<hash of env-surfaced secret version tokens>`
+  when any secret is env-surfaced (normative format; `-` joins the
+  components). File-surfaced secret rotation does **not** change the config
+  version (R8.5) — kubelet delivers it in place.
 - **R-VERSION.** The authoritative record of "which config version this
-  workload runs" is the stamp `kohen.dev/config-sha` on the pod-template
-  metadata. Matching desired-vs-stamped makes reconciliation idempotent and
-  the version auditable from workload metadata (UC7). Status additionally
-  exposes `sourceCommit` (plain git SHA) so users can correlate with git
-  history (the stamp holds the composite version, not necessarily the bare
-  SHA).
+  workload runs" is the stamp `kohen.dev/config-sha`: on the **pod-template**
+  metadata when `rollout: auto`, or on the **workload object's** metadata when
+  `rollout: none` (recorded without touching the pod template, so no restart
+  is triggered). Matching desired-vs-stamped makes reconciliation idempotent
+  and the version auditable from workload metadata in both modes (UC7). Status
+  additionally exposes `sourceCommit` (plain git SHA) so users can correlate
+  with git history (the stamp holds the composite version, not necessarily the
+  bare SHA).
 - **R-ROLLOUT.**
   - **.1 (stamp).** After successful apply + resolution, write the config
-    version to the pod-template annotation via §6.2 merge semantics.
+    version to the location R-VERSION prescribes for the sync's `rollout`
+    mode, via §6.2 merge semantics.
   - **.2 (match).** Trigger a rollout **only** on desired ≠ stamped; on match,
     make no write (no spurious rollouts).
   - **.3 (trigger).** Only the annotation update triggers the rollout; the
@@ -596,7 +602,8 @@ the v1 fail-closed contract (R8.9).
 - **R-SAFE.** A failed/interrupted reconcile leaves last-good objects and the
   current stamp intact.
 - **R-ROLLBACK.** Reverting the repo or pinning `spec.source.ref` to a prior
-  tag/commit reproduces the earlier objects and stamps the prior version.
+  tag/commit reproduces the earlier objects and stamps the prior version (per
+  R-VERSION's mode-dependent location).
 - **R-SINGLETON.** **At most one `ConfigSync` may target a given workload**
   (enforced; a second sync targeting the same `workloadRef` is rejected /
   `Degraded` with reason). Multiple workloads sharing a config path use one
@@ -611,9 +618,12 @@ the v1 fail-closed contract (R8.9).
 - **Rollout (default-on):** the version stamp changes on every config-version
   change, causing a rolling restart — the universal path for apps that read
   config at startup or via env.
-- **`spec.rollout: auto | none`** (default `auto`): `none` disables stamping
-  for hot-reload-capable apps that must not restart on config changes. There
-  is no third-party-reloader mode in v1 (Reloader interop deferred, §19).
+- **`spec.rollout: auto | none`** (default `auto`): `none` keeps the pod
+  template untouched — the version is recorded on the workload object's
+  metadata instead (R-VERSION) — for hot-reload-capable apps that must not
+  restart on config changes. Env surfacing with `rollout: none` is rejected at
+  validation time (env changes require a restart to take effect). There is no
+  third-party-reloader mode in v1 (Reloader interop deferred, §19).
 
 ---
 
@@ -632,7 +642,7 @@ the v1 fail-closed contract (R8.9).
 | Secret rotates (file-surfaced) | Kubelet updates in place; no rollout (R8.5). |
 | Secret rotates (env-surfaced) | Version advances → one rollout (R8.5, R-CONS). |
 | Version stamp already matches | No-op; no workload write (R-ROLLOUT.2). |
-| Workload not found / wrong kind / `OnDelete` | Object sync continues; reload condition `Degraded` with reason; no stamp. |
+| Workload not found / wrong kind / `OnDelete` | Object sync continues; `WorkloadWired=False` with reason (`WorkloadNotFound` / `UnsupportedStrategy`); no stamp. |
 | Second `ConfigSync` targets same workload | Rejected / `Degraded` (R-SINGLETON). |
 | Rollout stuck (crashloop on new config) | Built-in controller + `progressDeadlineSeconds`; surface status; never force-delete; rollback = pin prior ref. |
 | SSA conflict with another manager | Re-apply own fields only (R-WIRE.4); documented ignore rules (R-WIRE.5) prevent flapping. |
@@ -640,7 +650,9 @@ the v1 fail-closed contract (R8.9).
 
 - **R10.1** Retries use bounded exponential backoff with jitter.
 - **R10.2** Every failure state above maps to a **named condition reason**
-  (§11.4) and a metric — not only logs.
+  (§11.4) and a metric — not only logs. (Exception: "operator down" cannot set
+  conditions by definition; it is observable via the health endpoints and the
+  absence of the operator's metrics, R13.3.)
 
 ---
 
@@ -714,7 +726,8 @@ status:
 
 - **R11.1** CRDs validate via OpenAPI + CEL, including: namespace locality
   (R-AUTH.5), credential label (R-AUTH.6), supported `workloadRef.kind`,
-  `rollout` enum, secret-ref conflicts (R8.12), and R-SINGLETON (webhook or
+  `rollout` enum, env surfacing combined with `rollout: none` (rejected,
+  §9.1), secret-ref conflicts (R8.12), and R-SINGLETON (webhook or
   reconcile-time rejection).
 - **R11.2** Status reports `sourceCommit`, desired/stamped versions, rollout
   state, and per-reference resolution (no values).
