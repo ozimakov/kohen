@@ -273,12 +273,19 @@ dropped in per-workload via env vars.
   `ConfigSync` (and `ConfigSource`) resources.
 - **Sidecar mode:** Kohen running as a container in a workload's pod, configured
   by pod environment variables, syncing that workload's objects.
-- **Config version:** An immutable identifier for a produced set of objects — the
-  source git commit SHA (plus a content digest when overlays/secrets contribute).
+- **Config version / config git SHA:** An immutable identifier for a produced set
+  of objects — the source git commit SHA (extended with a content/secret digest
+  when overlays/secrets contribute). This is the value Kohen stamps on and matches
+  against workload metadata.
+- **SHA stamp:** The config git SHA recorded on the target workload's pod-template
+  metadata (annotation `kohen.dev/config-sha`), which is the version of record and
+  the rollout trigger (§11.1, R-VERSION).
 - **Reload contract:** How the application picks up updated objects (native
-  mounted-volume update, Reloader restart, or Kohen-driven rollout).
+  mounted-volume update, Reloader restart, in-place signal/HTTP, or the default
+  SHA-annotation rollout).
 - **Fleet consistency:** All consumers of a sync converge to objects produced from
-  a single resolved commit (operator mode guarantee).
+  a single resolved commit; with the rollout contract, guaranteed by construction
+  because every rolled pod carries the same SHA stamp.
 
 ---
 
@@ -501,6 +508,12 @@ resolution.
   produce **deterministic, idempotent** object content for a given commit so
   concurrent replicas converge without churn (R-SIDE-IDEM). Strong consistency
   requires operator mode.
+- **R-VERSION (version of record).** The authoritative "which config version is
+  this workload running" record is the **config git SHA stamped on the workload's
+  pod-template metadata** (R11.4). Kohen decides whether a reload/rollout is
+  needed by **matching** the desired config version against that stamp (R11.5),
+  which makes reconciliation idempotent and makes the deployed version auditable
+  directly from `Deployment`/`StatefulSet` metadata (UC7).
 - **R-SAFE (no destructive partial state).** A failed/interrupted sync MUST leave
   the last-good objects intact (no truncation, no deletion) (§14).
 - **R-ROLLBACK.** Reverting the repo or pinning a prior commit MUST reproduce the
@@ -534,9 +547,12 @@ drop-in. The simplistic set is three variables; the rest have safe defaults.
 - **R10.3 (RBAC).** Sidecar mode requires the pod's `ServiceAccount` to have a
   namespaced `Role` permitting `create/get/update/patch` on the target
   `ConfigMap`/`Secret` (and `create/patch` on `ExternalSecret`/`SealedSecret` if
-  used). Kohen MUST ship this `Role`/`RoleBinding` as an installable manifest and
-  document the security implication that a workload SA can then write those
-  objects. Strict environments SHOULD prefer operator mode.
+  used). When the SHA-annotation rollout contract (C4) is used, the `Role` MUST
+  also permit `get/patch` on the target `Deployment`/`StatefulSet`/`DaemonSet` so
+  the sidecar can stamp the SHA and trigger a rollout of its own workload. Kohen
+  MUST ship this `Role`/`RoleBinding` as an installable manifest and document the
+  security implication that a workload SA can then write those objects. Strict
+  environments SHOULD prefer operator mode.
 
 > The legacy prototype variables `KOHEN_GIT_URL`, `KOHEN_GIT_PATH`,
 > `KOHEN_TARGET_DIR` map to `KOHEN_REPO`, `KOHEN_PATH`, and (semantically) the
@@ -559,12 +575,54 @@ behaviors, selectable per sync (env var `KOHEN_RELOAD` or `ConfigSync.spec.reloa
   the app process after a successful apply.
 - **C3 — HTTP hook.** Kohen calls a configured local endpoint (e.g.
   `POST /-/reload`) after a successful apply.
-- **C4 — Rollout (operator).** The operator triggers a version-pinned rolling
-  restart of the workload.
+- **C4 — SHA-annotation rollout (default when reload is required).** Kohen stamps
+  the resolved **config git SHA** onto the target `Deployment`/`StatefulSet`
+  (and `DaemonSet`) metadata and drives a rolling update by mismatch. This is the
+  primary, declarative reload mechanism (§11.1) and works for any workload without
+  needing in-place reload support.
 
-Requirements:
+### 11.1 SHA-annotation rollout (C4) — the primary reload mechanism
 
-- **R11.1** The chosen contract MUST be explicit per sync and documented.
+Kohen records "which config version this workload is running" **in the workload's
+own metadata**, and reconciles a rollout by matching that against the desired
+config version.
+
+- **R11.4 (stamp).** On a successful apply, Kohen MUST record the resolved config
+  version — the **git commit SHA**, extended with the content/secret digest
+  (R-CONS, R8.6) — onto the target workload's **pod-template** metadata, as an
+  annotation (recommended: `kohen.dev/config-sha` on `spec.template.metadata`).
+  Writing to the pod template (not just the workload's top-level metadata) is what
+  makes Kubernetes perform a **rolling update**.
+- **R11.5 (match).** Each reconcile MUST compare the **desired** config version
+  against the version currently stamped on the workload. Kohen triggers a rollout
+  **only when they differ**; when they match, Kohen MUST make **no change** (no
+  spurious rollouts — this is the idempotency guarantee, R-SIDE-IDEM).
+- **R11.6 (trigger).** When a reload is needed (versions differ), Kohen MUST
+  trigger the rollout by updating the pod-template annotation to the new version,
+  letting the built-in `Deployment`/`StatefulSet`/`DaemonSet` controller perform
+  the rolling update with the workload's own `strategy`/`updateStrategy`. Kohen
+  MUST NOT implement its own pod-deletion rollout logic.
+- **R11.7 (order).** The annotation update MUST happen **only after** the
+  `ConfigMap`/`Secret` objects for the new version are successfully applied
+  (R11.2), so new pods start against the new objects.
+- **R11.8 (consistency & audit).** Because the SHA lives on the pod template, all
+  pods created by the rollout carry the same config version, giving fleet
+  consistency by construction; and the currently-applied version is readable
+  directly from workload metadata (UC7). Reverting to a prior SHA (rollback, UC6)
+  is the same mechanism in reverse.
+- **R11.9 (workload kinds).** C4 MUST support `Deployment` and `StatefulSet` and
+  SHOULD support `DaemonSet`. The target is named via `reload.workloadRef`
+  (operator) or defaulted to the sidecar's owning workload.
+
+> C4 is essentially "Kohen is its own Reloader, keyed on the git SHA": instead of
+> hashing rendered content into an annotation for a third-party tool (C1), Kohen
+> uses the authoritative git commit SHA as the version and owns the match/trigger
+> loop. C1 remains available for teams standardized on Stakater Reloader.
+
+### 11.2 Requirements (all contracts)
+
+- **R11.1** The chosen contract MUST be explicit per sync and documented. When
+  reload is required and the app cannot reload in place, C4 is the default.
 - **R11.2** A reload/hook/rollout MUST fire only **after** the objects are
   successfully applied.
 - **R11.3** Reload success/failure MUST be observable (metric + event/log) and
@@ -619,17 +677,18 @@ spec:
       fromSecret: { name: checkout-tls, key: tls.key }
   sync: { interval: 30s }
   reload:
-    contract: annotate                   # native | annotate | signal | http | rollout
-    workloadRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }
+    contract: rollout                    # native | annotate | signal | http | rollout
+    workloadRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }  # Deployment|StatefulSet|DaemonSet
+    shaAnnotation: kohen.dev/config-sha  # stamped on spec.template.metadata (R11.4)
 status:
-  configVersion: 9f1c2ab                  # includes content/secret digest (R-CONS)
+  configVersion: 9f1c2ab                  # desired version = git SHA + content/secret digest (R-CONS)
+  workloadVersion: 9f1c2ab                # version currently stamped on the workload (R-VERSION); rollout fires on mismatch
+  rolloutInProgress: false                # true while the built-in controller is rolling
   appliedObjects:
     - { kind: ConfigMap, name: checkout-config }
     - { kind: ExternalSecret, name: checkout-db }
   secrets:                                # resolution state only — never values (R8.7)
     - { key: db-password, resolved: true, via: externalSecret }
-  observedConsumers:                      # optional: per-replica converged version
-    - { pod: checkout-abc, version: 9f1c2ab }
   conditions: [ ... ]
 ```
 
@@ -688,7 +747,10 @@ status:
 | Secret unresolved (ESO not `Ready`, missing ref) | Fail closed for that secret; do not apply a version with unresolved secrets; keep last-good; `Degraded`; event; never log value. |
 | Backing secret rotates | Re-apply; content hash advances config version (R8.6) → reload/rollout per contract. |
 | Reload/hook/rollout failure | Objects remain applied; report per R11.3; apply configured failure policy. |
-| Concurrent sidecar writers (replicas) | Idempotent, deterministic apply ⇒ convergence, not churn (R-SIDE-IDEM); excess API writes bounded/deduped. |
+| SHA already matches workload (C4) | No-op: MUST NOT patch the workload or trigger a rollout (R11.5) — prevents spurious/looping rollouts. |
+| Target workload for rollout not found/wrong kind (C4) | Do not fail the object sync; mark `Degraded` on the reload condition; event; keep objects applied. |
+| Rollout stuck/failing (app crashloops on new config) | Kohen relies on the built-in controller + `progressDeadlineSeconds`; MUST surface rollout status and MUST NOT force-delete pods; rollback = stamp the prior SHA (R11.8). |
+| Concurrent sidecar writers (replicas) | Idempotent, deterministic apply + SHA match ⇒ convergence, not churn (R-SIDE-IDEM); excess API writes bounded/deduped. |
 | Operator down | Applied objects persist unchanged; no new versions until recovery; degrade gracefully. |
 | Signature verification failure | Do not apply that commit; security event. |
 
@@ -768,16 +830,19 @@ Ordered by dependency, not calendar. Each milestone is independently shippable.
 - **M1 — Sidecar MVP.** `kohen` init+sidecar, env-var config
   (`KOHEN_REPO`/`BRANCH`/`PATH`, R10.1–R10.2), git fetch, config→`ConfigMap`
   (§7.4), server-side apply + ownership + prune (T3, R8.3–R8.4), sidecar RBAC
-  manifest (R10.3), native + annotate reload (C0, C1), metrics/health, fail-safe
-  (§14). Delivers UC1, UC5.
+  manifest (R10.3), native volume reload (C0) **and the SHA-annotation rollout
+  (C4, §11.1): stamp `kohen.dev/config-sha` on the workload pod template, match
+  desired-vs-stamped, trigger a rolling update only on mismatch** (R11.4–R11.9),
+  metrics/health, fail-safe (§14). Delivers UC1, UC5.
 - **M2 — Secrets.** Config/secret split (§8.1), `ExternalSecret` (S1) and
   `SealedSecret` (S2) apply, existing-`Secret` references (S3), fail-closed +
-  rotation-triggered reload (R8.6), redaction (R8.7). Delivers UC3.
+  rotation-triggered rollout via the SHA stamp (R8.6, R11.4), redaction (R8.7).
+  Delivers UC3.
 - **M3 — Operator & CRDs.** `ConfigSource` + `ConfigSync`, branch→commit
-  resolution + fleet consistency (R-CONS), status/events, Helm chart. Delivers
-  UC2, UC4, UC7 with strong consistency.
-- **M4 — Reload completeness & rollout.** Signal/HTTP hooks (C2, C3), operator
-  rollout (C4), rollback (UC6, R-ROLLBACK), `kohenctl`.
+  resolution + fleet consistency (R-CONS), workload SHA matching across the fleet,
+  status/events, Helm chart. Delivers UC2, UC4, UC7 with strong consistency.
+- **M4 — Reload completeness.** Reloader annotation (C1), in-place signal/HTTP
+  hooks (C2, C3), rollback (UC6, R-ROLLBACK) via prior-SHA stamp, `kohenctl`.
 - **M5 — Injection & webhooks.** Optional sidecar auto-injection (R12.4),
   git-webhook-triggered syncs, signed-commit verification.
 - **M6 — Advanced.** Overlay/light templating (§7.4), `ConfigMap` splitting for
@@ -792,6 +857,11 @@ Ordered by dependency, not calendar. Each milestone is independently shippable.
   e2e `kind` test (R10.1–R10.2).
 - **A2** Committing a change updates the `ConfigMap`; a mounted-volume consumer
   observes it (C0) and a Reloader-annotated consumer restarts (C1).
+- **A2b** With the rollout contract (C4): a commit stamps the new config git SHA
+  on the `Deployment`/`StatefulSet` pod template and triggers exactly one rolling
+  update; a subsequent reconcile with an unchanged SHA triggers **no** rollout
+  (idempotent match, R11.4–R11.6); the deployed version is readable from workload
+  metadata (R-VERSION, UC7).
 - **A3** A git outage does not delete/corrupt objects or crash the workload;
   status shows `Degraded`; recovery re-applies automatically (T8, §14).
 - **A4** From one path, config lands in a `ConfigMap` and a secret is delivered via
