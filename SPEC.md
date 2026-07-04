@@ -892,9 +892,10 @@ v1 ships no CLI (N7). Documented `kubectl` recipes cover:
   triggers rollouts; file-surfaced rotation is kubelet-delivered.
 - **RD7 (v0.6)** `envFrom` unsupported (atomic list vs SSA); env surfacing via
   discrete `env[]` entries.
-- **RD8 (v0.6)** v1 trust stance: `ConfigSync` create ≈ Pod create
-  (documented); allow-lists as optional tightening; strict multi-tenant
-  authorization deferred.
+- **RD8 (v0.6, confirmed by owner)** v1 trust stance: **namespace-level
+  trust** — `ConfigSync` create ≈ Pod create (documented); allow-lists as
+  optional tightening; strict multi-tenant authorization (admission-webhook
+  policy) stays in the post-1.0 backlog with no v1 commitments.
 - **RD9 (v0.6)** kubectl-first operations; `kohenctl` deferred.
 
 ---
@@ -906,10 +907,7 @@ v1 ships no CLI (N7). Documented `kubectl` recipes cover:
    user-visible.
 2. **Sealed Secrets v1.1 shape:** same apply-if-present engine; confirm policy
    controls (issuer/key scope) before enabling.
-3. **Strict multi-tenancy demand:** is admission-webhook authorization
-   (R-AUTH.2 as policy CR) needed by early adopters, or does namespace-scoped
-   install suffice?
-4. **GitOps snippet shipping:** docs-only vs generated `ignoreDifferences`
+3. **GitOps snippet shipping:** docs-only vs generated `ignoreDifferences`
    fragments in the Helm chart.
 
 ---

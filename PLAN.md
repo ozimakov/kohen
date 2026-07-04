@@ -571,7 +571,7 @@ Sequenced roughly by expected demand; each becomes a plan entry when scheduled.
 | `DaemonSet` targets | Extend R-ROLLOUT.5 |
 | Reloader interop | Content-hash annotation mode |
 | In-repo `kohen.yaml` | Second config surface + precedence rules |
-| Strict multi-tenant authorization | Policy CR / admission webhook binding repos↔namespaces↔secrets (SPEC §18 Q3) |
+| Strict multi-tenant authorization | Policy CR / admission webhook binding repos↔namespaces↔secrets; v1 namespace-trust stance confirmed (SPEC RD8) |
 | Vault injector / Secrets Store CSI | Needs a readiness contract compatible with R8.9 |
 | Progressive rollout strategies | Only if native strategies prove insufficient |
 | Scale/performance validation harness | Publish NFR2/NFR3 numbers at scale |
