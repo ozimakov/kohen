@@ -1,6 +1,6 @@
 # KOHEN — Specification
 
-> Status: **Draft v0.3** · Owner: Kohen maintainers · Last updated: 2026-07-04
+> Status: **Draft v0.4** · Owner: Kohen maintainers · Last updated: 2026-07-04
 >
 > This document is the single source of truth for **what** Kohen is, **why** it
 > exists, and **which requirements** any implementation must satisfy. It is
@@ -9,84 +9,75 @@
 > technology is named, it is a requirement; where an approach is named, it is a
 > recommendation and is marked as such.
 >
-> **v0.3 changes the core model.** Kohen now synchronizes a git config path into
-> **native Kubernetes objects** — a `ConfigMap` for non-secret config and a
-> `Secret` / `ExternalSecret` for sensitive material — rather than materializing
-> files directly onto a shared volume. Workloads consume those native objects the
-> normal Kubernetes way. Kohen runs either as a cluster **operator** or as a
-> per-workload **sidecar** configured by pod environment variables.
+> **v0.4 scope decisions.** (1) Kohen ships as a cluster **operator** only; a
+> per-workload sidecar/env-var mode is explicitly **deferred** (§16 M6, §18). (2)
+> Secrets are handled by **integration/resolution, not production**: if config
+> references a secret, Kohen assumes it exists (or reconciles until it does) and
+> **resolves it into the pod using existing Kubernetes mechanics** — it never
+> stores, encrypts, or rotates secret material (§8).
 
 ---
 
 ## 1. Overview
 
-**Kohen** keeps Kubernetes-native configuration objects **in sync with a path in
-a dedicated `git` repository**. Given a repo, a branch, and a path, Kohen
-continuously renders:
+**Kohen** is a Kubernetes **operator** that keeps native cluster objects in sync
+with a path in a dedicated `git` configuration repository. Given a repo, a
+branch, and a path, Kohen continuously:
 
-- non-secret configuration → a **`ConfigMap`**, and
-- sensitive material → a **`Secret`** and/or an **`ExternalSecret`** (and other
-  supported secret manifests such as `SealedSecret`),
+- renders non-secret configuration into a **`ConfigMap`**;
+- **resolves** any secret the config references — assuming the backing secret
+  already exists or will be created — and makes it available to the workload
+  using **existing Kubernetes secret mechanics** (a `Secret` volume/`envFrom`, an
+  External Secrets `ExternalSecret`, a CSI-mounted secret, etc.); and
+- records the resolved **config git SHA** on the target workload and drives a
+  **rolling update** when — and only when — it changes.
 
-into the target namespace, and keeps them updated after every commit. The
-workload then consumes those objects exactly as it would any hand-written
-`ConfigMap`/`Secret` — mounted as a volume or projected as environment variables.
-
-Kohen runs in one of two modes:
-
-- **Operator mode** — a cluster controller, driven by a `ConfigSync` custom
-  resource, that manages many syncs centrally with strong fleet consistency and
-  no per-pod footprint.
-- **Sidecar mode** — a container added to a workload's pod, configured entirely by
-  **pod environment variables**, that syncs that workload's objects with no
-  operator and no CRDs. The simplistic setup requires only three variables: the
-  repo, the branch, and the path.
+The application consumes the resulting `ConfigMap` and secret exactly as it would
+any hand-authored object. Kohen decouples config/secret delivery from CI
+pipelines and app release cycles, sourcing them from one reviewed, multi-
+environment git repository.
 
 ### 1.1 One-sentence definition
 
-> Kohen synchronizes a dedicated git repository's config path into native
-> Kubernetes `ConfigMap` and `Secret`/`ExternalSecret` objects — as either a
-> cluster operator or a per-workload, env-var-configured sidecar — so
-> applications get their configuration and secrets from git without bespoke CI
-> glue or manual `kubectl apply`.
+> Kohen is a Kubernetes operator that syncs a dedicated git repo's config path
+> into a `ConfigMap`, resolves the secrets that config references into the
+> workload via existing Kubernetes/External-Secrets mechanics, and rolls the
+> workload out by matching the config git SHA on its metadata.
 
-### 1.2 The minimum viable usage (sidecar mode)
+### 1.2 Minimum viable usage
 
-Add the Kohen sidecar to a Deployment and set three environment variables:
+Point a `ConfigSync` at a repo/branch/path and a workload:
 
 ```yaml
-env:
-  - name: KOHEN_REPO
-    value: https://github.com/acme/platform-config.git
-  - name: KOHEN_BRANCH
-    value: main
-  - name: KOHEN_PATH
-    value: services/checkout/prod
+apiVersion: kohen.dev/v1alpha1
+kind: ConfigSync
+metadata: { name: checkout-prod, namespace: checkout }
+spec:
+  source:  { url: https://github.com/acme/platform-config.git, branch: main }
+  path:    services/checkout/prod
+  workloadRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }
 ```
 
-Kohen renders `services/checkout/prod` from `main` into a `ConfigMap` (and any
-declared `Secret`/`ExternalSecret`) in the pod's namespace, keeps it current, and
-the application mounts it as usual. That is the entire bare-minimum contract.
+Kohen renders `services/checkout/prod@main` into a `ConfigMap`, wires any
+secrets the config references into the `checkout` Deployment, stamps the config
+git SHA, and rolls it out on change. That is the entire bare-minimum contract.
 
 ### 1.3 Why native objects (not a private volume)
 
-Targeting `ConfigMap`/`Secret` rather than an `emptyDir` file tree is a
-deliberate design choice:
+Targeting `ConfigMap` + native secret mechanics rather than a private file tree
+is deliberate:
 
-- **Native, atomic delivery for free.** Kubelet already delivers mounted
-  `ConfigMap`/`Secret` updates **atomically** (via the `..data` symlink swap) and
-  consistently to every pod that mounts the object. Kohen does not reinvent
-  atomic file swaps.
-- **Fleet consistency for free.** A single `ConfigMap` object is a single source
-  of truth for the whole fleet; every replica converges to it as kubelet syncs.
-- **Ecosystem compatibility.** Works with existing patterns: mounted-volume hot
-  reload, [Stakater Reloader] for restart-on-change, `envFrom`, and External
-  Secrets Operator for secrets. Kohen composes with these rather than replacing
-  them.
-- **Known constraint, chosen deliberately.** A `ConfigMap`/`Secret` is limited to
-  ~1 MiB and flat keys. Kohen accepts this (see §13 T-LIMIT and §7.4 for
-  splitting) in exchange for native integration; very large file-tree configs are
-  out of Kohen's target scope in v1.
+- **Native, atomic delivery for free.** Kubelet delivers mounted
+  `ConfigMap`/`Secret` updates **atomically** (`..data` symlink swap) and
+  consistently to every pod. Kohen does not reinvent atomic file swaps.
+- **Fleet consistency for free.** A single `ConfigMap` is one source of truth for
+  the fleet, and the SHA stamp on the workload template makes every rolled pod
+  carry the same version (§9).
+- **Ecosystem compatibility.** Composes with External Secrets Operator, Sealed
+  Secrets, Vault, the Secrets Store CSI driver, and mounted-volume reload.
+- **Known constraint, chosen deliberately.** A `ConfigMap` is limited to ~1 MiB
+  and flat keys; Kohen accepts this (§12 T-LIMIT, §7.5 splitting) in exchange for
+  native integration. Very large file-tree configs are out of scope for v1.
 
 [Stakater Reloader]: https://github.com/stakater/Reloader
 
@@ -97,81 +88,72 @@ deliberate design choice:
 ### 2.1 The problem
 
 Teams increasingly want a **dedicated git repository** as the source of truth for
-their application configuration and secret wiring — reviewable, auditable,
-multi-environment, decoupled from application release cycles. But getting that
-git content into the `ConfigMap`/`Secret` objects a workload actually consumes is
-bespoke today:
+application configuration and its secret wiring — reviewable, auditable,
+multi-environment, decoupled from release cycles. Turning that git content into
+the `ConfigMap` a workload consumes, plus wiring in the secrets it references,
+plus rolling the workload when either changes, is bespoke today:
 
-1. **Sync burden.** Something must translate git commits into `ConfigMap`/`Secret`
-   updates — usually a hand-rolled CI job or a full GitOps pipeline. It couples
-   config changes to deployment tooling and app releases.
-2. **Config and secrets are handled by different tools.** Config goes through one
-   path (CI → `ConfigMap`) and secrets through another (ESO/Vault/Sealed
-   Secrets). There is no single, git-sourced sync that produces both for a
-   workload from one reviewed path.
-3. **No lightweight, self-service option.** A team that just wants "this pod's
-   config comes from that repo/branch/path" has to adopt heavyweight machinery.
-   There is no drop-in, env-var-configured syncer.
-4. **Multi-environment sprawl.** Representing dev/staging/prod variants inside
-   cluster objects or CI templates leads to duplication and drift; a dedicated
-   repo with a clear directory/branch model is easier to review — but nothing
-   turns it into live cluster objects on its own.
+1. **Sync burden.** Something must translate git commits into `ConfigMap`
+   updates — usually a hand-rolled CI job or a full GitOps pipeline, coupling
+   config to deployment tooling and releases.
+2. **Config and secrets are wired separately.** Config comes from one path (CI →
+   `ConfigMap`) and secrets from another (ESO/Vault/Sealed Secrets), with no
+   single git-sourced reconciler that produces the config and ensures the
+   referenced secrets are resolved into the same workload.
+3. **No automatic, consistent rollout on change.** Making the whole fleet move to
+   "config commit `abc123`" — and only when it actually changed — is
+   hand-rolled (annotation hashes, manual `kubectl rollout restart`).
+4. **Multi-environment sprawl.** dev/staging/prod variants in cluster objects or
+   CI templates duplicate and drift; a dedicated repo is easier to review, but
+   nothing turns it into live objects + rollouts on its own.
 
 ### 2.2 Why not just GitOps?
 
-GitOps controllers (Argo CD, Flux) reconcile Kubernetes API objects toward a
-git-declared desired state, and they *can* manage `ConfigMap`s. Kohen is
-**complementary and narrower**, and is useful even alongside GitOps because:
+GitOps controllers (Argo CD, Flux) reconcile Kubernetes objects toward a
+git-declared desired state and *can* manage `ConfigMap`s. Kohen is complementary
+and narrower:
 
-- It is purpose-built for the **config repo → `ConfigMap`+`Secret`/`ExternalSecret`**
-  transformation of a single path, including the config/secret split, rather than
-  reconciling arbitrary manifests.
-- It offers a **zero-CRD sidecar mode** configured by pod env vars, so a single
-  workload can adopt it without cluster-wide GitOps tooling or pipeline changes.
+- It is purpose-built for **config repo path → `ConfigMap` + resolved secret
+  references + SHA-matched rollout** of a specific workload, not for reconciling
+  arbitrary manifests.
 - It keeps a **dedicated config repository** as the source of truth, distinct from
-  the deployment repo GitOps typically reconciles.
+  a deployment repo, and owns the **secret-resolution + rollout** loop.
 
-Use GitOps to deploy what runs; use Kohen to keep a running workload's
-config/secret objects in sync with a dedicated config repo.
+Use GitOps to deploy what runs; use Kohen to keep a running workload's config
+object, resolved secrets, and rollouts in sync with a dedicated config repo.
 
 ### 2.3 Prior art / positioning
 
 | Approach | What it does | How Kohen differs |
 | --- | --- | --- |
-| CI job rendering `ConfigMap`s | Pipeline turns git into objects | Kohen is a running, declarative sync (operator or sidecar), decoupled from CI and app releases; also handles the secret split |
-| GitOps (Argo CD, Flux) | Reconcile cluster desired state from git | Kohen is a narrow git-path→(ConfigMap+Secret) sync with a zero-CRD sidecar mode and a dedicated config repo model; composes with GitOps |
-| `git-sync` sidecar | Syncs a git repo into a **volume** | Kohen syncs into **native objects** (ConfigMap/Secret/ExternalSecret), gaining native atomic delivery, fleet consistency, and the config/secret split |
-| External Secrets Operator (ESO) | Pulls secrets from external stores into `Secret`s | Kohen handles **config** and **orchestrates** secrets by applying `ExternalSecret`s from git; ESO remains the secret authority |
-| Stakater Reloader | Restarts pods when a `ConfigMap`/`Secret` changes | Complementary: Kohen produces the objects from git; Reloader (or file-watch) handles reload |
-| Bespoke init scripts | Clone config at startup | One-shot, no live updates, no object model, per-team reinvention |
+| CI job rendering `ConfigMap`s | Pipeline turns git into objects | Kohen is a running operator, decoupled from CI/releases; also resolves referenced secrets and drives the rollout |
+| GitOps (Argo CD, Flux) | Reconcile cluster desired state from git | Kohen is a narrow config-path→object + secret-resolution + SHA-rollout loop over a dedicated config repo; composes with GitOps |
+| External Secrets Operator (ESO) | Pulls secrets from external stores into `Secret`s | Kohen **consumes** ESO: it references/applies `ExternalSecret`s and wires the resulting `Secret` into the pod; ESO remains the secret authority |
+| Sealed Secrets / Vault / CSI | Make secret material available in-cluster | Kohen integrates with each as a resolution backend (§8) rather than replacing them |
+| Stakater Reloader | Restarts pods when a `ConfigMap`/`Secret` changes | Kohen has its own SHA-matched rollout (§9); Reloader interop remains available |
+| Bespoke init scripts | Clone config at startup | One-shot, no live updates, no object model, no rollout, per-team reinvention |
 
-Kohen's distinguishing combination: **a running git→native-objects sync that
-produces both config (`ConfigMap`) and secrets (`Secret`/`ExternalSecret`) from
-one reviewed config-repo path, available either as a central operator or as a
-drop-in, env-var-configured sidecar, across multiple environments.**
+Kohen's distinguishing combination: **a git→`ConfigMap` operator that also
+resolves the secrets the config references into the workload (via existing
+mechanics), and rolls the workload out by matching the config git SHA — over a
+dedicated, multi-environment config repo.**
 
 ### 2.4 When NOT to use Kohen (and what to use instead)
 
-Kohen is intentionally narrow. Reach for something else when:
+- **Your config exceeds `ConfigMap` limits** (~1 MiB, huge file trees). A direct
+  `git-sync`-to-volume pattern fits better (a Kohen volume mode is deferred, N5).
+- **You already render `ConfigMap`s from git via GitOps** and do not want a second
+  reconciler or a separate config repo. Keep doing that.
+- **You need a secrets manager.** Use External Secrets Operator / Vault / Sealed
+  Secrets. Kohen **integrates** with these to make secrets available in the pod;
+  it does not store, encrypt, or rotate them (§3.2 N2, §8).
+- **You only hand-author a `ConfigMap` and want restart-on-change.** `ConfigMap` +
+  Reloader is enough; Kohen adds the git source of truth and secret resolution.
+- **You want to toggle product behavior in code.** Use a feature-flag platform.
 
-- **Your config genuinely exceeds `ConfigMap` limits** (~1 MiB, flat keys, huge
-  file trees). Kohen targets object-sized config; a direct-volume `git-sync`
-  pattern fits better (a Kohen file-volume mode is a possible future, not v1).
-- **You already render `ConfigMap`s from git via GitOps** and do not want a
-  separate config repo or a second reconciler. Keep doing that.
-- **You only need secrets from an external store.** Use External Secrets Operator
-  directly; Kohen adds value when you also want git-sourced config and/or the
-  git-declared `ExternalSecret` workflow in the same sync.
-- **You only need "restart on `ConfigMap` change" and already author the
-  `ConfigMap` by hand.** A `ConfigMap` + Reloader is enough; Kohen adds the git
-  source of truth on top.
-- **You want to toggle product behavior / run experiments in code.** Use a
-  feature-flag platform (OpenFeature-compatible).
-
-Kohen is the right tool when you want a **dedicated git repo (multi-environment)
-to be the source of truth for a workload's `ConfigMap` and `Secret`/`ExternalSecret`
-objects**, delivered by a running sync that is either centrally operated or
-dropped in per-workload via env vars.
+Kohen fits when you want a **dedicated, multi-environment git repo to drive a
+workload's `ConfigMap`, its referenced secrets, and its rollouts**, centrally and
+declaratively.
 
 ---
 
@@ -179,48 +161,48 @@ dropped in per-workload via env vars.
 
 ### 3.1 Goals
 
-- **G1** Continuously synchronize a git `repo@branch:path` into a target
-  **`ConfigMap`** (non-secret config) in the workload's namespace.
-- **G2** Synchronize sensitive material into a **`Secret`** and/or
-  **`ExternalSecret`** (and support other secret manifests, e.g. `SealedSecret`)
-  from the same git path, **without plaintext secrets in git** (§8).
-- **G3** Offer **two modes** with the same output contract:
-  **operator** (CRD-driven, central, multi-workload) and **sidecar**
-  (per-workload, configured by pod env vars, no CRDs).
-- **G4** Make the **simplistic path trivial**: a sidecar needs only `repo`,
-  `branch`, `path` as env vars to work.
-- **G5** Support a **multi-environment** repository model (dev/staging/prod, and
+- **G1** As an operator, continuously synchronize a git `repo@branch:path` into a
+  target **`ConfigMap`** in the workload's namespace.
+- **G2 — Secret resolution (not production).** For each secret the config
+  references, **assume it exists or reconcile until it does**, then make it
+  available to the workload using **existing Kubernetes secret mechanics** (§8).
+  Kohen MUST NOT store, encrypt, or rotate secret material.
+- **G3** Support a broad menu of secret backends — External Secrets Operator
+  (primary), native `Secret`, Sealed Secrets, Vault, and the Secrets Store CSI
+  driver — via a common resolution model (§8.3).
+- **G4** Support a **multi-environment** repository model (dev/staging/prod, and
   optionally region/tenant) selected by branch and/or path.
-- **G6** Keep objects **current** after each commit and, in operator mode,
-  guarantee **fleet consistency** (all consumers converge to one resolved
-  version).
-- **G7** Compose with the ecosystem for **reload** (native mounted-volume updates,
-  Reloader, or an optional Kohen-driven rollout) rather than reinventing it.
-- **G8** Be **secure by default**: least-privilege git access and least-privilege
-  RBAC for writing `ConfigMap`/`Secret` objects; secrets never logged.
-- **G9** Be **operable and fail-safe**: a git or Kohen outage must never delete or
-  corrupt existing objects or take down healthy workloads.
+- **G5** Keep the target objects **current** and guarantee **fleet consistency**:
+  resolve the branch to a single commit, produce objects from it, and converge all
+  pods to that version.
+- **G6 — SHA-matched rollout.** Record the resolved **config git SHA** on the
+  workload and trigger a rolling update **only when it changes** (§9).
+- **G7** Be **secure by default**: least-privilege git access; least-privilege
+  RBAC scoped to the objects/workloads it manages; secrets never logged.
+- **G8** Be **operable and fail-safe**: a git/secret-backend/Kohen outage must
+  never delete or corrupt existing objects, wire an unresolved secret, or take
+  down healthy workloads.
+- **G9** Keep the declarative surface **minimal**: repo/branch/path + a workload
+  reference is enough for the common case (§1.2).
 
 ### 3.2 Non-Goals
 
-- **N1** Kohen is **not** a GitOps/CD engine; it does not reconcile arbitrary
-  Kubernetes manifests or deploy applications. It syncs a config path into a
-  bounded set of config/secret objects.
-- **N2** Kohen is **not** a secrets manager and does **not** store, encrypt, or
-  rotate secret material. It **orchestrates** secrets by applying
-  `ExternalSecret`/`SealedSecret` manifests from git and by composing native
-  `Secret`s from existing references; the external tool remains the authority
-  (§8.3).
-- **N3** Kohen does **not** own the *schema/validation semantics* of an
-  application's config beyond optional structural checks.
-- **N4** Kohen is **not** a templating platform competitor to Helm/Kustomize.
-  Light, deterministic overlay/substitution MAY be supported (§7.4); complex
-  rendering is out of scope for v1.
-- **N5** Kohen does **not** deliver config as a large private file tree on a
-  volume in v1; the target is `ConfigMap`/`Secret` objects, subject to their size
-  limits (§1.3, §13 T-LIMIT). A direct-file-volume mode is a possible future
-  (§20).
-- **N6** Kohen does **not** provide a UI in v1 (CLI + Kubernetes API only).
+- **N1** Not a GitOps/CD engine; does not reconcile arbitrary manifests or deploy
+  applications.
+- **N2** Not a secrets manager. Kohen **resolves and wires** secrets that other
+  tools own; it does not store, encrypt, generate, or rotate secret material
+  (§8).
+- **N3** Does not own the schema/validation semantics of an app's config beyond
+  optional structural checks.
+- **N4** Not a templating platform competitor to Helm/Kustomize; light,
+  deterministic overlay/substitution MAY be supported (§7.4).
+- **N5** Does not deliver config as a large private file tree/volume in v1; the
+  target is `ConfigMap` + native secret mechanics, bounded by their size limits
+  (§1.3, §12 T-LIMIT). A volume-target mode is a possible future (§18).
+- **N6** **Operator-only in v1.** A per-workload sidecar with env-var
+  configuration is explicitly deferred (§16 M6, §18); all v1 behavior is delivered by
+  the operator.
+- **N7** No UI in v1 (CLI + Kubernetes API only).
 
 ---
 
@@ -228,73 +210,70 @@ dropped in per-workload via env vars.
 
 ### 4.1 Personas
 
-- **Application developer (Dana).** Owns a service. Wants its `ConfigMap` and
-  secret wiring to come from a reviewed PR in a dedicated config repo, and to
-  adopt this by adding a sidecar and three env vars — no platform ticket.
-- **Platform / SRE engineer (Sam).** Operates the cluster. Wants a central,
-  auditable operator that syncs many workloads' config/secret objects from git
-  with least-privilege RBAC, strong fleet consistency, metrics, and safe failure
-  modes.
+- **Application developer (Dana).** Owns a service. Wants its `ConfigMap` and the
+  secrets it uses to come from a reviewed PR in a dedicated config repo, declared
+  once via a `ConfigSync`, and to roll out automatically on change.
+- **Platform / SRE engineer (Sam).** Operates the cluster and the Kohen operator.
+  Wants a central, auditable, least-privilege reconciler that integrates with the
+  cluster's chosen secret backend (ESO/Vault/etc.) and drives consistent
+  rollouts.
 - **Security / compliance reviewer (Riley).** Wants config changes reviewed and
-  attributable to commits, **no plaintext secrets in git**, secrets sourced via
-  ESO/Sealed Secrets, and least-privilege access to write cluster objects.
+  attributable to commits, **no plaintext secrets in git**, secret material owned
+  by the approved backend, and least-privilege access for the operator.
 
 ### 4.2 Primary use cases
 
-- **UC1 — Simplistic sidecar sync.** A workload adds the Kohen sidecar with
-  `repo`/`branch`/`path` env vars; Kohen creates and maintains its `ConfigMap`.
-- **UC2 — Central operator sync.** A `ConfigSync` resource makes the operator keep
-  a workload's `ConfigMap`/`Secret` in sync, with fleet-consistent versions.
-- **UC3 — Config + secrets together.** From one git path, Kohen produces a
-  `ConfigMap` for config and applies an `ExternalSecret` (populated by ESO) for
-  credentials — no plaintext in git.
-- **UC4 — Multi-environment.** dev/staging/prod are selected by branch and/or
-  path with no duplication of the config payload in manifests.
-- **UC5 — Live update + reload.** A merged commit updates the `ConfigMap`; the app
-  hot-reloads the mounted volume, or Reloader/an optional Kohen rollout restarts
-  it.
-- **UC6 — Rollback.** Reverting the repo (or pinning a prior commit) restores the
-  previous objects.
-- **UC7 — Audit.** For any workload, one can determine which git commit produced
-  the currently applied objects.
+- **UC1 — Config sync.** A `ConfigSync` keeps a workload's `ConfigMap` in sync with
+  a git path, fleet-consistently.
+- **UC2 — Secret resolution.** Config references a secret; Kohen resolves the
+  backing `Secret` (assuming it exists or reconciling until it does) and makes it
+  available to the pod via existing mechanics — no plaintext in git (§8).
+- **UC3 — External Secrets integration.** The referenced secret is backed by an
+  `ExternalSecret`; Kohen ensures it is applied/present and wires the resulting
+  `Secret` into the workload; ESO owns the material.
+- **UC4 — Multi-environment.** dev/staging/prod selected by branch and/or path,
+  no payload duplication.
+- **UC5 — SHA-matched rollout.** A merged commit (or a resolved-secret change)
+  stamps a new config git SHA and triggers exactly one rolling update; an
+  unchanged SHA triggers none.
+- **UC6 — Rollback.** Reverting the repo or pinning a prior commit restores the
+  objects and stamps the prior SHA.
+- **UC7 — Audit.** For any workload, the applied config git SHA is readable from
+  its metadata and the `ConfigSync` status.
 
 ---
 
 ## 5. Terminology (Glossary)
 
 - **Config repository (config repo):** A dedicated git repository that is the
-  source of truth for application configuration and secret wiring, distinct from
-  application source/deploy repos.
-- **Config path:** The subdirectory within the config repo a sync consumes
-  (e.g. `services/checkout/prod`).
-- **Sync target objects:** The Kubernetes objects Kohen produces and maintains —
-  a `ConfigMap` and zero or more `Secret`/`ExternalSecret`/`SealedSecret`.
-- **Operator mode:** Kohen running as a cluster controller reconciling
-  `ConfigSync` (and `ConfigSource`) resources.
-- **Sidecar mode:** Kohen running as a container in a workload's pod, configured
-  by pod environment variables, syncing that workload's objects.
+  source of truth for application configuration and its secret references,
+  distinct from application source/deploy repos.
+- **Config path:** The subdirectory within the config repo a sync consumes.
+- **`ConfigSync`:** The custom resource describing one git-path→objects
+  synchronization and its target workload (§11).
 - **Config version / config git SHA:** An immutable identifier for a produced set
-  of objects — the source git commit SHA (extended with a content/secret digest
-  when overlays/secrets contribute). This is the value Kohen stamps on and matches
-  against workload metadata.
+  of objects — the source git commit SHA, extended with a content digest and a
+  hash of resolved-secret identities/versions (never values). Kohen stamps and
+  matches this on the workload.
 - **SHA stamp:** The config git SHA recorded on the target workload's pod-template
-  metadata (annotation `kohen.dev/config-sha`), which is the version of record and
-  the rollout trigger (§11.1, R-VERSION).
-- **Reload contract:** How the application picks up updated objects (native
-  mounted-volume update, Reloader restart, in-place signal/HTTP, or the default
-  SHA-annotation rollout).
-- **Fleet consistency:** All consumers of a sync converge to objects produced from
-  a single resolved commit; with the rollout contract, guaranteed by construction
-  because every rolled pod carries the same SHA stamp.
+  metadata (annotation `kohen.dev/config-sha`); the version of record and rollout
+  trigger (§9).
+- **Secret reference:** A pointer in the config (never the value) to secret
+  material owned by a supported backend, which Kohen **resolves** and makes
+  available in the pod (§8).
+- **Resolution:** Determining the concrete in-cluster `Secret` (or CSI/injected
+  material) for a reference — waiting/reconciling until it exists — and wiring it
+  into the workload via existing mechanics.
+- **Fleet consistency:** All pods of the workload run objects produced from one
+  resolved commit; guaranteed because every rolled pod carries the same SHA stamp.
 
 ---
 
 ## 6. System Architecture
 
-Kohen has one binary that can run in two modes, plus a repository model and a
-git→objects transformation (§7, §8). Both modes produce the **same output
-contract**: a `ConfigMap` and optional `Secret`/`ExternalSecret` in the target
-namespace, labeled and owned by Kohen.
+Kohen is a single cluster operator (a `Deployment`) reconciling `ConfigSync`
+resources. Its output is native objects in the workload's namespace plus a
+SHA-matched rollout of the workload.
 
 ```
             ┌──────────────────────────────────────────────┐
@@ -302,78 +281,66 @@ namespace, labeled and owned by Kohen.
             │   services/checkout/{dev,staging,prod}/...    │
             └───────────────┬──────────────────────────────┘
                             │ fetch repo@branch:path (poll/webhook, read-only)
-        ┌───────────────────┴────────────────────┐
-        ▼                                         ▼
-┌───────────────────────┐              ┌────────────────────────────────┐
-│  OPERATOR MODE        │              │  SIDECAR MODE                   │
-│  kohen-operator       │              │  kohen sidecar in the pod       │
-│  (Deployment)         │              │  configured via pod env vars    │
-│  reconciles ConfigSync│              │  (KOHEN_REPO/BRANCH/PATH)       │
-└──────────┬────────────┘              └───────────────┬────────────────┘
-           │ apply/update (server-side apply, owner refs)                │
-           ▼                                                             ▼
+                            ▼
+                 ┌───────────────────────┐
+                 │   kohen-operator      │  reconciles ConfigSync
+                 │   (Deployment)        │
+                 └──────────┬────────────┘
+        render config        │ resolve secret refs        stamp SHA + rollout
+        ─────────────┐       │       ┌──────────────────┐        │
+                     ▼       ▼       ▼                  │        ▼
    ┌───────────────────────────────────────────────────────────────────────┐
    │ Target namespace                                                        │
-   │   ConfigMap  <name>            (non-secret config)                      │
-   │   Secret / ExternalSecret      (sensitive material; ESO populates)      │
+   │   ConfigMap  <name>          (non-secret config)                        │
+   │   references → backing Secret via ESO / native / SealedSecret / CSI     │
+   │   Deployment/StatefulSet: ConfigMap + Secret wired in; SHA annotation   │
    └───────────────────────────────┬───────────────────────────────────────┘
-                                    │ mounted as volume / envFrom
+                                    │ built-in controller rolls out on SHA change
                                     ▼
                         ┌───────────────────────────┐
                         │  Application workload     │
-                        │  reads ConfigMap/Secret;  │
-                        │  reload via volume update, │
-                        │  Reloader, or rollout      │
+                        │  reads ConfigMap + Secret │
                         └───────────────────────────┘
 ```
 
-### 6.1 The sync (common to both modes)
+### 6.1 The reconcile loop
 
-A single sync cycle: **fetch** `repo@branch:path` → **resolve** the commit →
-**transform** into desired objects (config→`ConfigMap`, secrets→`Secret`/
-`ExternalSecret`, §8) → **apply** them to the target namespace (server-side
-apply, with Kohen ownership labels/annotations and, where applicable, owner
-references) → **prune** objects Kohen previously created that no longer exist in
-git → **signal reload** per the configured contract (§11).
+For each `ConfigSync`, one cycle:
 
-### 6.2 Operator mode
+1. **Fetch** `repo@branch:path` and resolve the branch to a concrete commit.
+2. **Render** non-secret config → desired `ConfigMap` (§7.4).
+3. **Resolve secrets** the config references (§8): ensure/await the backing
+   secret, and wire it into the workload via existing mechanics. If any reference
+   is unresolved, **fail closed** (do not proceed to stamp/rollout).
+4. **Apply** the `ConfigMap` (and any manifests Kohen owns) via server-side apply
+   with ownership labels; **prune** objects it previously created that vanished
+   from git.
+5. **Stamp & rollout** — compute the config version (SHA + digests), compare to
+   the workload's stamp, and if changed, update the pod-template annotation to
+   trigger a rolling update (§9). If unchanged, do nothing.
+6. **Report** status/events/metrics.
 
-- A cluster `Deployment` reconciling `ConfigSource` (repo + auth) and `ConfigSync`
-  (branch, path, targets, policy) resources (§12).
-- **Resolves the branch to a concrete commit once** and applies objects derived
-  from that commit, giving **fleet consistency** (R-CONS).
-- No per-pod footprint; suited to production and many workloads.
-- Least-privilege, namespaced RBAC to write only the objects it manages.
-- OPTIONALLY runs a mutating webhook to inject the sidecar (for teams that prefer
-  the sidecar UX but centrally managed) and OPTIONALLY receives git webhooks to
-  accelerate syncs.
+### 6.2 Workload wiring
 
-### 6.3 Sidecar mode
+- Kohen references the produced `ConfigMap` and resolved secrets into the target
+  workload's pod template using **existing Kubernetes mechanics** (a `ConfigMap`/
+  `Secret` volume + mount, or `env`/`envFrom` with `secretKeyRef`/`secretRef`, or
+  a CSI volume — §8.4). It manages only the portions it owns (labeled/annotated),
+  and never disturbs unrelated parts of the pod spec.
+- Changes to owned wiring alter the pod template and therefore participate in the
+  SHA-matched rollout.
 
-- A `kohen` container added to the workload's pod (recommended: an **init**
-  invocation to create the objects before the app starts, plus a **sidecar**
-  invocation to keep them current).
-- Configured **entirely by pod environment variables** (§10). The simplistic
-  setup is `KOHEN_REPO` + `KOHEN_BRANCH` + `KOHEN_PATH`.
-- No CRDs, no operator required — a drop-in for a single workload.
-- Writes the objects via the pod's `ServiceAccount`, which therefore needs RBAC
-  to manage the target `ConfigMap`/`Secret` in its namespace (§10.3). This is a
-  deliberate trade-off documented for reviewers; strict environments SHOULD use
-  operator mode.
-- Consistency is **eventual** across replicas (each sidecar resolves the branch
-  independently); writes MUST be deterministic and idempotent so concurrent
-  replicas converge (R-SIDE-IDEM). For strong fleet consistency, use operator
-  mode.
+### 6.3 Operator responsibilities & optional accelerators
 
-### 6.4 Choosing a mode
+- Least-privilege RBAC scoped to the namespaces/objects/workloads it manages
+  (§12 T7).
+- OPTIONALLY receives git provider **webhooks** to accelerate syncs beyond
+  polling.
+- OPTIONALLY verifies **signed commits** before acting on a commit.
 
-| | Operator mode | Sidecar mode |
-| --- | --- | --- |
-| Setup | `ConfigSource` + `ConfigSync` CRs | Pod env vars only |
-| Footprint | One central Deployment | One container per pod |
-| Fleet consistency | Strong (single resolved commit) | Eventual (per-replica resolve) |
-| RBAC surface | Central, scoped to operator | Workload `ServiceAccount` can write objects |
-| Best for | Production, many workloads, strict security | Simplicity, single/low-replica workloads, self-service |
+> A per-workload sidecar mode configured by pod environment variables
+> (`KOHEN_REPO`/`KOHEN_BRANCH`/`KOHEN_PATH`, matching the prototype) is **deferred**
+> (N6). The operator is the only mode in v1.
 
 ---
 
@@ -383,20 +350,20 @@ git → **signal reload** per the configured contract (§11).
 
 - **R7.1** A config repo MUST be a standard git repository reachable over HTTPS or
   SSH.
-- **R7.2** A sync MUST select a **branch** and a **path** (subdirectory) so a
-  single repo can serve many workloads and environments.
+- **R7.2** A sync MUST select a **branch** and a **path** so one repo can serve
+  many workloads and environments.
 - **R7.3** The model MUST support multiple environments without duplicating the
   config payload across manifests.
 
 ### 7.2 Environment selection
 
 - **Path-based (default):** environments are subdirectories, e.g.
-  `services/checkout/{dev,staging,prod}`. Single branch (`main`), simplest review.
+  `services/checkout/{dev,staging,prod}` on one branch.
 - **Branch-based:** each environment is a branch (`env/dev`, `env/prod`).
 - **Pinning:** a sync MAY pin to a tag or explicit commit SHA for immutable,
   auditable releases and rollbacks.
 
-Selection MUST be explicit (branch + path, or a pinned ref); no implicit magic.
+Selection MUST be explicit (branch + path, or a pinned ref).
 
 ### 7.3 Layout conventions (recommended, not enforced)
 
@@ -407,521 +374,458 @@ config-repo/
         └── prod/
             ├── app.yaml              # -> ConfigMap key app.yaml
             ├── logging.conf          # -> ConfigMap key logging.conf
-            └── kohen.yaml            # optional per-path Kohen config (targets, secrets, split)
+            └── kohen.yaml            # optional: secret references, targets, split, overlay
 ```
 
 ### 7.4 Config → `ConfigMap` mapping
 
-- **R7.4** By default, each regular file under `path` becomes one **key** in the
-  target `ConfigMap` (key = file's path relative to `path`; binary content uses
-  `binaryData`). Directory structure is flattened into keys deterministically.
-- **R7.5** When the rendered content would exceed `ConfigMap` limits (§13
-  T-LIMIT), Kohen MUST fail closed with an actionable error and MAY support
-  splitting across multiple named `ConfigMap`s (documented, deterministic).
-- **R7.6** Optional light overlay/templating (deep-merge of a `base` + `<env>`,
-  bounded variable substitution) MAY be supported per §3.2 N4; if enabled it MUST
-  be deterministic. Otherwise content is mapped **verbatim**.
+- **R7.4** By default each regular file under `path` becomes one **key** in the
+  target `ConfigMap` (key = path relative to `path`; binary content →
+  `binaryData`), flattened deterministically.
+- **R7.5** If rendered content would exceed `ConfigMap` limits (§12 T-LIMIT),
+  Kohen MUST fail closed with an actionable error and MAY support splitting across
+  multiple named `ConfigMap`s (documented, deterministic).
+- **R7.6** Optional light overlay/templating (deep-merge of `base` + `<env>`,
+  bounded variable substitution) MAY be supported per N4; if enabled it MUST be
+  deterministic. Otherwise content is mapped **verbatim**.
 
 ### 7.5 Per-path Kohen config (`kohen.yaml`, optional)
 
-The path MAY contain a `kohen.yaml` that declares target object names, the
-config/secret split, secret mappings (§8), and reload policy. In sidecar mode this
-lets the repo own the details while the pod supplies only `repo`/`branch`/`path`.
-Fields set by env vars or a `ConfigSync` take precedence over `kohen.yaml` per a
-documented order; conflicts that cannot be ordered MUST be rejected.
+The path MAY contain a `kohen.yaml` declaring target object names, secret
+references (§8), the config/secret split, overlay, and reload policy — so the repo
+can own the details while the `ConfigSync` supplies only source/path/workload.
+Fields on the `ConfigSync` take precedence per a documented order; unorderable
+conflicts MUST be rejected.
 
 ---
 
-## 8. Git → Objects Transformation & Secrets
+## 8. Secret Integration & Resolution
 
-Kohen never expects **plaintext secrets in git**. It splits a config path into a
-non-secret `ConfigMap` and secret objects produced through tools that own the
-secret material.
+Kohen's secret responsibility is **integration, not production**. Config in git
+never contains secret values; it **references** secrets owned by a supported
+backend. Kohen **resolves** each reference and makes the material available to the
+workload using **existing Kubernetes mechanics**.
 
-### 8.1 Config vs. secret classification
+### 8.1 Principles
 
-- **R8.1** Files/keys are classified as **config** (→ `ConfigMap`) unless declared
-  **secret**. Secret declaration is explicit via one of:
-  - files under a conventional `secrets/` subdirectory of the path, and/or
-  - a `secrets:` mapping in `kohen.yaml` / `ConfigSync` (§8.2), and/or
-  - recognized secret manifests committed in git (`ExternalSecret`,
-    `SealedSecret`) which Kohen applies as-is.
-- **R8.2** A file classified as secret MUST NOT be written into the `ConfigMap`.
+- **P1 — No plaintext secrets in git.** Only references live in git.
+- **P2 — Kohen never owns the material.** It does not store, encrypt, generate, or
+  rotate secret values. The backend (ESO/Vault/Sealed Secrets/native `Secret`/CSI
+  provider) is the authority (N2).
+- **P3 — Assume-exists, else reconcile.** A referenced secret is assumed to exist
+  or to be on its way. If it is not yet present, Kohen **waits/reconciles**
+  (requeue with backoff), marks the sync `Pending`/`Degraded`, and MUST NOT wire
+  or roll out an unresolved reference (fail closed, R8.4).
+- **P4 — Existing mechanics only.** Kohen surfaces the secret to the pod using
+  standard Kubernetes constructs (`Secret` volume/`envFrom`/`secretKeyRef`, or a
+  CSI `SecretProviderClass` volume), not a bespoke delivery path.
 
-### 8.2 Secret sources (all consumed via, or producing, a native `Secret`)
+### 8.2 What "resolve" means
 
-- **S1 — `ExternalSecret` (recommended).** The config path contains (or Kohen
-  generates from a mapping) an `ExternalSecret`. Kohen **applies** it; External
-  Secrets Operator populates the resulting `Secret`. No secret value is in git.
-- **S2 — `SealedSecret`.** The path contains an encrypted `SealedSecret`. Kohen
-  applies it; the Sealed Secrets controller decrypts it into a `Secret`.
-- **S3 — Reference to an existing `Secret`.** A mapping references keys of
-  `Secret`s already in the namespace to compose/rename into the target `Secret`.
-- **S4 — Native `Secret` created by Kohen (constrained).** Kohen MAY create a
-  `Secret` only from material that is itself sourced securely (S1–S3 outputs or an
-  explicitly referenced source); it MUST NOT read plaintext secret values from
-  git.
+For each reference, Kohen:
 
-Kohen is the **applier/orchestrator**; ESO / Sealed Secrets / the referenced
-`Secret` remain the source of truth and rotation authority (N2).
+1. **Identifies the backing secret** (a `Secret` name/keys, or a CSI provider
+   class, per the backend).
+2. **Ensures/awaits existence.** If the config (or `kohen.yaml`) includes a
+   creation manifest (an `ExternalSecret` or `SealedSecret`), Kohen MAY apply it so
+   the responsible controller creates the `Secret`; otherwise it waits for an
+   external actor. Kohen reconciles until the material is present and (for ESO)
+   `Ready`.
+3. **Wires it into the workload** via the requested mechanic (§8.4).
+4. Includes a **hash of the resolved secret's identity/version** (never the value)
+   in the config version, so a backing-secret change participates in the rollout
+   (§9).
 
-### 8.3 Ownership, pruning & rotation
+### 8.3 Supported backends (the menu users can choose)
 
-- **R8.3** Objects Kohen creates MUST carry Kohen ownership labels/annotations and
-  (for namespaced consumers) appropriate owner references, so they are
-  identifiable, auditable, and safely prunable.
-- **R8.4** When a file/secret disappears from git, Kohen MUST prune the object/key
-  **it created**; it MUST NOT delete objects it does not own.
-- **R8.5** Kohen MUST NOT delete or overwrite a pre-existing object it does not own
-  without explicit adopt-on-apply opt-in.
-- **R8.6** A referenced/backing secret rotating MUST be reflected: Kohen re-applies
-  as needed and, where a rollout/reload is configured, folds a **hash of the
-  produced object content** (never the secret value) into the config version so
-  rotation triggers reload (R-CONS, §9).
+| Backend | How the `Secret` comes to exist | Kohen's role | Notes |
+| --- | --- | --- | --- |
+| **External Secrets Operator (primary)** | ESO syncs from Vault/AWS/GCP/Azure/… into a `Secret` via an `ExternalSecret` | Reference the `ExternalSecret`/its target `Secret`; optionally apply the `ExternalSecret` from git; await `Ready`; wire the `Secret` in | Recommended default; broad provider support |
+| **Native `Secret`** | Created out-of-band (kubectl, another controller) | Reference it by name/keys; await existence; wire it in | Simplest; Kohen adds no lifecycle |
+| **Sealed Secrets (Bitnami)** | Sealed Secrets controller decrypts a `SealedSecret` into a `Secret` | Optionally apply the (encrypted) `SealedSecret` from git; await the `Secret`; wire it in | Encrypted material can live in git safely |
+| **HashiCorp Vault** | Via ESO, or Vault Agent Injector, or the CSI provider | For ESO: as above. For Injector/CSI: ensure the required annotations / CSI volume are present on the pod | Prefer ESO unless injector/CSI already standard |
+| **Secrets Store CSI Driver** (AWS/GCP/Azure/Vault providers) | CSI driver mounts provider secrets; optionally syncs to a `Secret` | Ensure the `SecretProviderClass` reference + CSI volume/mount are wired into the pod | Good when secrets must be mounted, not in etcd |
 
-### 8.4 Secret handling requirements
+- **R8.1** ESO MUST be supported first-class; the others MUST be supported through
+  the same reference/resolution model where the mechanics allow.
+- **R8.2** The backend is explicit per reference; Kohen MUST NOT guess a backend.
 
-- **R8.7** Secret values MUST NEVER appear in logs, events, metrics, CR status, or
-  CLI output; only presence/absence and hashed markers are exposed.
-- **R8.8** Kohen MUST NOT persist secret material to disk except as required by
-  the applied tool; any transient secret handling MUST use memory only.
-- **R8.9** Conflicting/ambiguous secret mappings MUST be rejected at validation
-  time, not silently merged.
+### 8.4 Surfacing mechanics (existing Kubernetes constructs)
+
+- **File:** add a `Secret` (or CSI) volume and a `volumeMount` at a declared path.
+  Auto-updates via kubelet for native/ESO `Secret`s.
+- **Env:** add container `env` with `valueFrom.secretKeyRef`, or `envFrom` with a
+  `secretRef`. (Env values change only on pod restart → covered by the SHA
+  rollout.)
+- Kohen MUST manage only the volumes/mounts/env entries it adds (owned markers)
+  and MUST NOT modify unrelated pod-spec fields.
+
+### 8.5 Requirements
+
+- **R8.3** No secret value MUST ever appear in git, logs, events, metrics,
+  `ConfigSync` status, or CLI output; only reference identity, presence, and
+  hashed markers are exposed.
+- **R8.4 (fail closed).** An unresolved/incomplete reference (missing `Secret`,
+  missing key, ESO not `Ready`) MUST prevent stamping/rollout for that version;
+  keep last-good; mark `Pending`/`Degraded`; emit an event; requeue.
+- **R8.5 (rotation).** When the backing secret changes, Kohen MUST reflect it: for
+  volume-mounted native/ESO secrets, kubelet updates the file; where a restart is
+  required (env), the resolved-secret hash advances the config version and drives
+  the rollout (§9).
+- **R8.6 (least privilege).** The operator MUST read only the specific `Secret`s /
+  namespaces it must resolve, scoped by RBAC (ideally `resourceNames`-limited);
+  cross-namespace references MUST be off by default and require explicit
+  allow-listing.
+- **R8.7** Conflicting/ambiguous references MUST be rejected at validation time,
+  not silently merged.
 
 ---
 
-## 9. Consistency & Atomicity Model
+## 9. Consistency, Atomicity & Rollout
 
-Kohen leans on native Kubernetes semantics and adds fleet-level version
-resolution.
+Kohen leans on native Kubernetes semantics and adds a single resolved version per
+sync, recorded on the workload.
 
 - **R-ATOM (delivery atomicity).** Mounted `ConfigMap`/`Secret` updates are made
-  atomically by kubelet (`..data` symlink swap); Kohen relies on this and MUST
-  apply object updates atomically (server-side apply of a fully-formed object,
-  never partial writes).
-- **R-CONS (fleet consistency, operator mode).** The operator MUST resolve the
-  tracked branch to a **single commit** and produce objects from that commit, so
-  every consumer of the sync converges to one **config version**. The config
-  version MUST incorporate a content digest (including produced-secret hashes,
-  R8.6) so any change — git or backing-secret — advances it.
-- **R-CONS-SIDE (sidecar mode).** Consistency is eventual; each sidecar MUST
-  produce **deterministic, idempotent** object content for a given commit so
-  concurrent replicas converge without churn (R-SIDE-IDEM). Strong consistency
-  requires operator mode.
-- **R-VERSION (version of record).** The authoritative "which config version is
-  this workload running" record is the **config git SHA stamped on the workload's
-  pod-template metadata** (R11.4). Kohen decides whether a reload/rollout is
-  needed by **matching** the desired config version against that stamp (R11.5),
-  which makes reconciliation idempotent and makes the deployed version auditable
-  directly from `Deployment`/`StatefulSet` metadata (UC7).
-- **R-SAFE (no destructive partial state).** A failed/interrupted sync MUST leave
-  the last-good objects intact (no truncation, no deletion) (§14).
+  atomically by kubelet; Kohen MUST apply object updates atomically (server-side
+  apply of fully-formed objects, never partial writes).
+- **R-CONS (fleet consistency).** The operator MUST resolve the branch to a
+  **single commit** and produce objects from it, and MUST record the resulting
+  **config version** on the workload so every pod converges to one version. The
+  config version MUST incorporate a content digest and a resolved-secret hash
+  (R8.5) so any change advances it.
+- **R-VERSION (version of record).** The authoritative record of "which config
+  version this workload runs" is the **config git SHA stamped on the workload's
+  pod-template metadata** (annotation `kohen.dev/config-sha`). Kohen decides
+  whether a rollout is needed by **matching** the desired version against that
+  stamp; this makes reconciliation idempotent and the deployed version auditable
+  from workload metadata (UC7).
+- **R-ROLLOUT (SHA-matched rollout — primary reload mechanism).**
+  - **R-ROLLOUT.1 (stamp).** After a successful apply + secret resolution, Kohen
+    MUST write the config version onto the target `Deployment`/`StatefulSet`
+    (SHOULD support `DaemonSet`) **pod-template** metadata. Writing to the pod
+    template is what makes the built-in controller perform a rolling update.
+    RBAC per T7.
+  - **R-ROLLOUT.2 (match).** Each reconcile MUST compare desired vs. stamped and
+    trigger a rollout **only when they differ**; when they match, Kohen MUST make
+    **no change** (no spurious rollouts).
+  - **R-ROLLOUT.3 (trigger).** Kohen triggers the rollout only by updating the
+    annotation, letting the built-in controller roll out with the workload's own
+    `strategy`/`updateStrategy`. Kohen MUST NOT implement custom pod-deletion
+    rollout logic.
+  - **R-ROLLOUT.4 (order).** The stamp/rollout MUST happen only **after** the
+    `ConfigMap` is applied and all secret references are resolved (R8.4), so new
+    pods start against the new objects and available secrets.
+- **R-SAFE (no destructive partial state).** A failed/interrupted reconcile MUST
+  leave last-good objects and the current stamp intact (no truncation/deletion).
 - **R-ROLLBACK.** Reverting the repo or pinning a prior commit MUST reproduce the
-  earlier objects (UC6).
+  earlier objects and stamp the prior SHA (UC6).
+
+> This makes Kohen "its own Reloader keyed on the git SHA": rather than hashing
+> rendered content for a third-party tool, Kohen uses the authoritative commit SHA
+> as the version and owns the match/trigger loop. Native mounted-volume reload
+> (C0) and Stakater Reloader interop (C1) remain available for apps that
+> hot-reload without a restart (§10).
 
 ---
 
-## 10. Sidecar Configuration (Environment Variables)
+## 10. Reload / Consumption Options
 
-Sidecar mode is configured **only** by environment variables so it is a true
-drop-in. The simplistic set is three variables; the rest have safe defaults.
+The workload consumes the produced objects natively. Reload behavior:
 
-| Env var | Required | Default | Description |
-| --- | --- | --- | --- |
-| `KOHEN_REPO` | yes | — | Config repo URL (HTTPS/SSH). |
-| `KOHEN_BRANCH` | no | `main` | Branch to track (or a pinned tag/commit). |
-| `KOHEN_PATH` | no | `""` (repo root) | Path within the repo to sync. |
-| `KOHEN_CONFIGMAP` | no | derived from workload name | Target `ConfigMap` name. |
-| `KOHEN_SECRET` | no | derived / disabled | Target `Secret` name (if any). |
-| `KOHEN_NAMESPACE` | no | pod namespace | Target namespace (defaults to own). |
-| `KOHEN_INTERVAL` | no | `30s` | Poll cadence. |
-| `KOHEN_MODE` | no | `init+sidecar` | `init`, `sidecar`, or both. |
-| `KOHEN_AUTH_SECRET` | no | — | Name of a `Secret` holding git credentials. |
-| `KOHEN_RELOAD` | no | `none` | `none｜annotate｜signal｜http｜rollout` (§11). |
-| `KOHEN_METRICS_ADDR` | no | `:9095` | Metrics/health bind address. |
+- **C0 — Native volume update (default for mounted `ConfigMap`/`Secret`).** The
+  app re-reads on kubelet's atomic update; no restart. Kohen does nothing beyond
+  applying objects.
+- **C1 — Reloader interop (optional).** Kohen MAY set a content-hash annotation so
+  [Stakater Reloader] restarts the workload, for teams standardized on it.
+- **C-ROLLOUT — SHA-matched rollout (default when a restart is required).** As
+  specified in §9 (R-ROLLOUT). This is the primary mechanism for apps that read
+  config/secrets at startup or via `envFrom`.
 
-- **R10.1** With only `KOHEN_REPO` (and defaults), Kohen MUST perform a valid sync
-  of the repo root on `main` into a derived `ConfigMap`.
-- **R10.2** The three headline variables `KOHEN_REPO`/`KOHEN_BRANCH`/`KOHEN_PATH`
-  MUST be sufficient for the documented simplistic case (G4).
-- **R10.3 (RBAC).** Sidecar mode requires the pod's `ServiceAccount` to have a
-  namespaced `Role` permitting `create/get/update/patch` on the target
-  `ConfigMap`/`Secret` (and `create/patch` on `ExternalSecret`/`SealedSecret` if
-  used). When the SHA-annotation rollout contract (C4) is used, the `Role` MUST
-  also permit `get/patch` on the target `Deployment`/`StatefulSet`/`DaemonSet` so
-  the sidecar can stamp the SHA and trigger a rollout of its own workload. Kohen
-  MUST ship this `Role`/`RoleBinding` as an installable manifest and document the
-  security implication that a workload SA can then write those objects. Strict
-  environments SHOULD prefer operator mode.
+Requirements:
 
-> The legacy prototype variables `KOHEN_GIT_URL`, `KOHEN_GIT_PATH`,
-> `KOHEN_TARGET_DIR` map to `KOHEN_REPO`, `KOHEN_PATH`, and (semantically) the
-> target object; they SHOULD be accepted as deprecated aliases where sensible.
+- **R10.1** The chosen behavior MUST be explicit per sync and documented; when a
+  restart is required, SHA-matched rollout is the default.
+- **R10.2** Any restart/rollout MUST fire only **after** objects are applied and
+  secrets resolved (R-ROLLOUT.4), and success/failure MUST be observable and MUST
+  NOT corrupt applied objects.
+
+> In-pod reload options (signal, local HTTP hook) require a process-adjacent
+> component and are deferred with sidecar mode (N6, §16 M6).
 
 ---
 
-## 11. Reload / Consumption Contract
+## 11. Kubernetes API (CRDs)
 
-Workloads consume the produced objects natively; Kohen offers a menu of reload
-behaviors, selectable per sync (env var `KOHEN_RELOAD` or `ConfigSync.spec.reload`).
-
-- **C0 — Native volume update (default for mounted ConfigMaps).** The app mounts
-  the `ConfigMap`/`Secret` and re-reads on kubelet's atomic update. Kohen does
-  nothing beyond applying the object.
-- **C1 — Reloader annotation.** Kohen sets a content-hash annotation so
-  [Stakater Reloader] (or equivalent) restarts the workload on change. Turnkey for
-  apps that read config only at startup or via `envFrom`.
-- **C2 — Signal.** Kohen (sidecar) sends a configured signal (default `SIGHUP`) to
-  the app process after a successful apply.
-- **C3 — HTTP hook.** Kohen calls a configured local endpoint (e.g.
-  `POST /-/reload`) after a successful apply.
-- **C4 — SHA-annotation rollout (default when reload is required).** Kohen stamps
-  the resolved **config git SHA** onto the target `Deployment`/`StatefulSet`
-  (and `DaemonSet`) metadata and drives a rolling update by mismatch. This is the
-  primary, declarative reload mechanism (§11.1) and works for any workload without
-  needing in-place reload support.
-
-### 11.1 SHA-annotation rollout (C4) — the primary reload mechanism
-
-Kohen records "which config version this workload is running" **in the workload's
-own metadata**, and reconciles a rollout by matching that against the desired
-config version.
-
-- **R11.4 (stamp).** On a successful apply, Kohen MUST record the resolved config
-  version — the **git commit SHA**, extended with the content/secret digest
-  (R-CONS, R8.6) — onto the target workload's **pod-template** metadata, as an
-  annotation (recommended: `kohen.dev/config-sha` on `spec.template.metadata`).
-  Writing to the pod template (not just the workload's top-level metadata) is what
-  makes Kubernetes perform a **rolling update**.
-- **R11.5 (match).** Each reconcile MUST compare the **desired** config version
-  against the version currently stamped on the workload. Kohen triggers a rollout
-  **only when they differ**; when they match, Kohen MUST make **no change** (no
-  spurious rollouts — this is the idempotency guarantee, R-SIDE-IDEM).
-- **R11.6 (trigger).** When a reload is needed (versions differ), Kohen MUST
-  trigger the rollout by updating the pod-template annotation to the new version,
-  letting the built-in `Deployment`/`StatefulSet`/`DaemonSet` controller perform
-  the rolling update with the workload's own `strategy`/`updateStrategy`. Kohen
-  MUST NOT implement its own pod-deletion rollout logic.
-- **R11.7 (order).** The annotation update MUST happen **only after** the
-  `ConfigMap`/`Secret` objects for the new version are successfully applied
-  (R11.2), so new pods start against the new objects.
-- **R11.8 (consistency & audit).** Because the SHA lives on the pod template, all
-  pods created by the rollout carry the same config version, giving fleet
-  consistency by construction; and the currently-applied version is readable
-  directly from workload metadata (UC7). Reverting to a prior SHA (rollback, UC6)
-  is the same mechanism in reverse.
-- **R11.9 (workload kinds).** C4 MUST support `Deployment` and `StatefulSet` and
-  SHOULD support `DaemonSet`. The target is named via `reload.workloadRef`
-  (operator) or defaulted to the sidecar's owning workload.
-
-> C4 is essentially "Kohen is its own Reloader, keyed on the git SHA": instead of
-> hashing rendered content into an annotation for a third-party tool (C1), Kohen
-> uses the authoritative git commit SHA as the version and owns the match/trigger
-> loop. C1 remains available for teams standardized on Stakater Reloader.
-
-### 11.2 Requirements (all contracts)
-
-- **R11.1** The chosen contract MUST be explicit per sync and documented. When
-  reload is required and the app cannot reload in place, C4 is the default.
-- **R11.2** A reload/hook/rollout MUST fire only **after** the objects are
-  successfully applied.
-- **R11.3** Reload success/failure MUST be observable (metric + event/log) and
-  MUST NOT corrupt applied objects on failure.
-
----
-
-## 12. Kubernetes API (CRDs — operator mode)
-
-Operator mode exposes declarative resources. Field names are indicative; the API
+The operator exposes declarative resources. Field names are indicative; the API
 MUST be versioned (`v1alpha1` → `v1beta1` → `v1`) and follow Kubernetes API
 conventions (status subresource, `observedGeneration`, printer columns, CEL
 validation where possible).
 
-### 12.1 `ConfigSource` (namespaced or cluster-scoped)
-
-```yaml
-apiVersion: kohen.dev/v1alpha1
-kind: ConfigSource
-metadata: { name: platform-config, namespace: checkout }
-spec:
-  url: https://github.com/acme/platform-config.git
-  interface: https                       # https | ssh
-  auth: { secretRef: { name: kohen-git-creds } }
-  verification:                           # optional
-    requireSignedCommits: true
-    allowedSignersSecretRef: { name: kohen-allowed-signers }
-status:
-  conditions: [ ... ]
-  lastResolvedCommit: 9f1c2ab
-```
-
-### 12.2 `ConfigSync` (namespaced) — the primary resource
-
-Describes one git-path → objects synchronization.
+### 11.1 `ConfigSync` (namespaced) — the primary resource
 
 ```yaml
 apiVersion: kohen.dev/v1alpha1
 kind: ConfigSync
 metadata: { name: checkout-prod, namespace: checkout }
 spec:
-  sourceRef: { name: platform-config }
-  branch: main                           # or pinned tag/commit
+  source:
+    url: https://github.com/acme/platform-config.git
+    branch: main                          # or pinned tag/commit
+    interface: https                      # https | ssh
+    authSecretRef: { name: kohen-git-creds }        # optional (private repos)
   path: services/checkout/prod
-  targets:
-    configMap: { name: checkout-config }
-    secret:    { name: checkout-secrets }        # optional
-  secrets:                               # optional (§8); may also live in-repo kohen.yaml
-    - key: db-password
-      externalSecret: { name: checkout-db }      # ESO-managed; applied by Kohen
-    - key: tls-key
-      fromSecret: { name: checkout-tls, key: tls.key }
-  sync: { interval: 30s }
+  configMap: { name: checkout-config }              # target; defaults derived from workload
+  secretRefs:                             # optional (§8); may also live in-repo kohen.yaml
+    - name: db-password
+      backend: externalSecret             # externalSecret | nativeSecret | sealedSecret | vault | csi
+      externalSecret: { name: checkout-db }         # applied by Kohen if present in git; ESO populates
+      surface: { as: env, envVar: DB_PASSWORD, key: password }
+    - name: tls
+      backend: nativeSecret
+      nativeSecret: { name: checkout-tls }
+      surface: { as: file, mountPath: /etc/tls }
+  workloadRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }  # Deployment|StatefulSet|DaemonSet
   reload:
-    contract: rollout                    # native | annotate | signal | http | rollout
-    workloadRef: { apiVersion: apps/v1, kind: Deployment, name: checkout }  # Deployment|StatefulSet|DaemonSet
-    shaAnnotation: kohen.dev/config-sha  # stamped on spec.template.metadata (R11.4)
+    onRestart: rollout                    # rollout (default) | reloaderAnnotation | none
+    shaAnnotation: kohen.dev/config-sha   # stamped on spec.template.metadata (R-VERSION)
+  sync: { interval: 30s }
 status:
-  configVersion: 9f1c2ab                  # desired version = git SHA + content/secret digest (R-CONS)
-  workloadVersion: 9f1c2ab                # version currently stamped on the workload (R-VERSION); rollout fires on mismatch
-  rolloutInProgress: false                # true while the built-in controller is rolling
-  appliedObjects:
-    - { kind: ConfigMap, name: checkout-config }
-    - { kind: ExternalSecret, name: checkout-db }
-  secrets:                                # resolution state only — never values (R8.7)
-    - { key: db-password, resolved: true, via: externalSecret }
+  configVersion: 9f1c2ab                  # desired = git SHA + content + resolved-secret hash (R-CONS)
+  workloadVersion: 9f1c2ab                # currently stamped on the workload; rollout fires on mismatch
+  rolloutInProgress: false
+  secretRefs:                             # resolution state only — never values (R8.3)
+    - { name: db-password, resolved: true,  backend: externalSecret }
+    - { name: tls,         resolved: false, reason: SecretNotFound }   # -> Pending/Degraded, no rollout
   conditions: [ ... ]
 ```
 
-### 12.3 Requirements
+### 11.2 Requirements
 
-- **R12.1** CRDs MUST validate inputs (OpenAPI/CEL).
-- **R12.2** Status MUST report the config version, applied objects, and secret
-  resolution state (no values).
-- **R12.3** Deleting a `ConfigSync` MUST prune only Kohen-owned objects (R8.4) and
-  MUST NOT delete workloads.
-- **R12.4** Optional sidecar auto-injection MUST be opt-in per workload
-  (annotation/selector), never global-by-default.
+- **R11.1** CRDs MUST validate inputs (OpenAPI/CEL).
+- **R11.2** Status MUST report the desired/stamped config versions, rollout state,
+  and per-reference secret resolution state (no values).
+- **R11.3** Deleting a `ConfigSync` MUST prune only Kohen-owned objects and
+  Kohen-added workload wiring; it MUST NOT delete the workload or secrets it does
+  not own.
+- **R11.4** Kohen MUST NOT modify workload pod-spec fields it does not own, nor
+  adopt/overwrite pre-existing objects it does not own without explicit opt-in.
 
 ---
 
-## 13. Technical Requirements
+## 12. Technical Requirements
 
-- **T1 — Language/runtime.** Go (consistent with the prototype and the k8s
-  ecosystem); current stable Go (≥ 1.23).
-- **T2 — Git access.** Use a maintained Go git library (prototype uses `go-git`);
-  shallow fetch and fetch-by-commit to enforce pinning and minimize bandwidth.
-- **T3 — Apply semantics.** Object writes MUST use **server-side apply** with a
-  stable field manager and Kohen ownership labels; updates MUST be idempotent
-  (same commit ⇒ same object, R-SIDE-IDEM).
+- **T1 — Language/runtime.** Go (consistent with the prototype and ecosystem);
+  current stable Go (≥ 1.23). Operator built with `controller-runtime`.
+- **T2 — Git access.** Maintained Go git library (prototype uses `go-git`);
+  shallow fetch and fetch-by-commit to pin and minimize bandwidth.
+- **T3 — Apply semantics.** Server-side apply with a stable field manager and
+  ownership labels; idempotent (same commit + resolved secrets ⇒ same objects,
+  same stamp ⇒ no rollout).
 - **T4 — Kubernetes compatibility.** Support the **N-2** range of supported
-  upstream minor versions; operator SHOULD use `controller-runtime`.
+  upstream minor versions.
 - **T-LIMIT — Object size.** Produced `ConfigMap`/`Secret` are bounded by the
-  Kubernetes ~1 MiB object limit. Kohen MUST detect oversize and fail closed with
-  an actionable error (R7.5); splitting is the supported mitigation.
-- **T5 — Distribution.** One multi-arch (`amd64`/`arm64`), minimal
-  (distroless/static) image usable as both operator and sidecar; install via Helm
-  chart and plain manifests, including the sidecar RBAC `Role` (R10.3).
-- **T6 — Footprint.** Small enough to run as a sidecar in every pod (target idle
-  < 32 MiB RAM, negligible idle CPU; documented and tested).
-- **T7 — Security posture.** Run as non-root on a read-only root filesystem;
-  least-privilege RBAC in both modes.
-- **T8 — Failure isolation.** A git outage MUST NOT delete/corrupt objects or
-  crash the workload; keep last-good objects and surface degraded status.
-- **T9 — Determinism.** Given the same commit + inputs, produced object content
-  MUST be byte-identical (stable key ordering, stable merges).
-- **T10 — Scale (operator).** Reconcile many `ConfigSync`es efficiently (work
-  queues, shared informers, rate limiting); dedup git fetches by repo+commit and
-  bound fetch concurrency.
+  ~1 MiB object limit; Kohen MUST detect oversize and fail closed (R7.5).
+- **T5 — Distribution.** Multi-arch (`amd64`/`arm64`), minimal
+  (distroless/static) operator image; install via Helm chart and plain manifests,
+  including scoped RBAC and CRDs.
+- **T6 — Footprint.** The operator's footprint MUST be documented and bounded;
+  scale is per §14 NFR3.
+- **T7 — RBAC / security posture.** Least-privilege, namespace-scoped RBAC:
+  read the specific git-cred and referenced `Secret`s (R8.6), manage the target
+  `ConfigMap`, and `get/patch` the target workloads. Run as non-root on a
+  read-only root filesystem. No cluster-admin.
+- **T8 — Failure isolation.** A git or secret-backend outage MUST NOT delete/
+  corrupt objects, wire unresolved secrets, or crash workloads; keep last-good and
+  surface degraded status.
+- **T9 — Determinism.** Same commit + resolved inputs ⇒ byte-identical objects and
+  a stable config version.
+- **T10 — Scale.** Reconcile many `ConfigSync`es efficiently (work queues, shared
+  informers, rate limiting); dedup git fetches by repo+commit; bound fetch
+  concurrency; watch referenced `Secret`s to react to rotation.
 
 ---
 
-## 14. Failure Modes & Resilience
+## 13. Failure Modes & Resilience
 
 | Failure | Required behavior |
 | --- | --- |
-| Git unreachable (initial) | Retry with backoff to a deadline; sidecar init MAY start the app if a previously-applied object exists; else fail and let restart policy retry; log + event. |
-| Git unreachable (steady state) | Keep last-good objects (T8); mark `Degraded`; never delete/prune on inability to fetch. |
+| Git unreachable | Retry with backoff; keep last-good objects and stamp (T8); mark `Degraded`; never prune on inability to fetch. |
 | Auth failure | Fail fast with actionable error; event; avoid account-locking retry storms; redact secrets. |
-| Malformed/missing path | Do not apply a bad version; keep last-good; `Degraded`; event. |
+| Malformed/missing path | Do not apply/stamp a bad version; keep last-good; `Degraded`; event. |
 | Oversize object (T-LIMIT) | Fail closed with a clear error; suggest split; keep last-good. |
-| Secret unresolved (ESO not `Ready`, missing ref) | Fail closed for that secret; do not apply a version with unresolved secrets; keep last-good; `Degraded`; event; never log value. |
-| Backing secret rotates | Re-apply; content hash advances config version (R8.6) → reload/rollout per contract. |
-| Reload/hook/rollout failure | Objects remain applied; report per R11.3; apply configured failure policy. |
-| SHA already matches workload (C4) | No-op: MUST NOT patch the workload or trigger a rollout (R11.5) — prevents spurious/looping rollouts. |
-| Target workload for rollout not found/wrong kind (C4) | Do not fail the object sync; mark `Degraded` on the reload condition; event; keep objects applied. |
-| Rollout stuck/failing (app crashloops on new config) | Kohen relies on the built-in controller + `progressDeadlineSeconds`; MUST surface rollout status and MUST NOT force-delete pods; rollback = stamp the prior SHA (R11.8). |
-| Concurrent sidecar writers (replicas) | Idempotent, deterministic apply + SHA match ⇒ convergence, not churn (R-SIDE-IDEM); excess API writes bounded/deduped. |
-| Operator down | Applied objects persist unchanged; no new versions until recovery; degrade gracefully. |
-| Signature verification failure | Do not apply that commit; security event. |
+| Referenced secret missing / ESO not `Ready` | **Fail closed** (R8.4): do not wire, stamp, or roll out; `Pending`/`Degraded`; requeue; event; never log value. |
+| Backing secret rotates | Volume-mounted secrets update via kubelet; env-surfaced secrets advance the config version (R8.5) → rollout. |
+| SHA already matches workload | No-op: MUST NOT patch the workload or roll out (R-ROLLOUT.2) — prevents spurious/looping rollouts. |
+| Target workload not found / wrong kind | Do not fail the object sync; mark reload condition `Degraded`; event; keep objects applied. |
+| Rollout stuck (app crashloops on new config) | Rely on the built-in controller + `progressDeadlineSeconds`; surface rollout status; MUST NOT force-delete pods; rollback = stamp prior SHA (R-ROLLBACK). |
+| Operator down | Applied objects and stamps persist unchanged; no new versions until recovery; degrade gracefully. |
+| Signature verification failure | Do not act on that commit; security event. |
 
-- **R14.1** Retries MUST use bounded exponential backoff with jitter.
-- **R14.2** All failure states MUST appear in status/conditions and metrics, not
+- **R13.1** Retries MUST use bounded exponential backoff with jitter.
+- **R13.2** All failure states MUST appear in status/conditions and metrics, not
   only logs.
 
 ---
 
-## 15. Observability
+## 14. Observability & Non-Functional Requirements
 
-- **R15.1 — Metrics (Prometheus).** At minimum: sync attempts/successes/failures,
-  sync duration, current config version (labeled info metric), objects
-  applied/pruned, secret-resolution success/failure (counts only, never values),
-  reload outcomes, git fetch latency/errors, and degraded-state gauges.
-- **R15.2 — Logging.** Structured (JSON), configurable level; secret material
-  redacted everywhere (R8.7).
-- **R15.3 — Health.** Readiness reflects "a valid version applied"; liveness MUST
-  NOT flap on git outages (T8).
-- **R15.4 — Events.** Emit Kubernetes events for applies, prunes, version changes,
-  and failures.
-- **R15.5 — Auditability.** For any workload it MUST be possible to answer "which
-  git commit produced the current objects, and when did it change" (UC7).
+### 14.1 Observability
 
----
+- **R14.1 — Metrics (Prometheus).** At minimum: reconcile attempts/successes/
+  failures and duration; current config version (labeled info metric); objects
+  applied/pruned; secret-resolution success/failure/pending (counts only, never
+  values); rollouts triggered vs. skipped-on-match; git fetch latency/errors;
+  degraded-state gauges.
+- **R14.2 — Logging.** Structured (JSON), configurable level; secret material
+  redacted everywhere (R8.3).
+- **R14.3 — Health.** Standard operator readiness/liveness; liveness MUST NOT flap
+  on git/secret-backend outages (T8).
+- **R14.4 — Events.** Emit events for applies, prunes, secret resolution
+  outcomes, stamps/rollouts, and failures.
+- **R14.5 — Auditability.** For any workload, the applied config git SHA MUST be
+  readable from workload metadata and `ConfigSync` status (UC7).
 
-## 16. Non-Functional Requirements
+### 14.2 Non-Functional
 
 - **NFR1 — Reliability.** Kohen MUST fail safe: its unavailability degrades
-  *freshness of objects*, never *availability of healthy workloads* or the
-  integrity of already-applied objects.
+  *freshness*, never *availability* of healthy workloads or the integrity of
+  applied objects/stamps.
 - **NFR2 — Performance.** Detect+apply a change within a bounded, configurable
   window (default target ≤ 60 s via polling; faster with webhooks).
-- **NFR3 — Scalability.** Hundreds of `ConfigSync`es / workloads per operator
-  without overloading the git backend (dedup by repo+commit).
-- **NFR4 — Compatibility.** Work with mainstream git providers (GitHub, GitLab,
-  Bitbucket, self-hosted) over HTTPS/SSH; no proprietary API required for core
-  function (webhooks are an optional accelerator). Compose with ESO, Sealed
-  Secrets, and Reloader.
+- **NFR3 — Scalability.** Hundreds of `ConfigSync`es/workloads per operator
+  without overloading git or the API server (dedup by repo+commit).
+- **NFR4 — Compatibility.** Mainstream git providers (GitHub, GitLab, Bitbucket,
+  self-hosted) over HTTPS/SSH; compose with ESO, Sealed Secrets, Vault, the CSI
+  driver, and Reloader; no proprietary API required for core function.
 - **NFR5 — Portability.** Any conformant Kubernetes; `amd64` + `arm64`.
-- **NFR6 — Usability.** The simplistic sidecar path (three env vars) MUST be
-  demonstrated end-to-end in getting-started docs; the "when NOT to use" guidance
-  (§2.4) MUST be prominent.
-- **NFR7 — Documentation.** Concepts, install (Helm + manifests + sidecar RBAC),
-  security hardening, CRD reference, sidecar env-var reference, reload cookbook,
-  troubleshooting.
+- **NFR6 — Usability.** The minimal `ConfigSync` (source + path + workloadRef)
+  MUST be demonstrated end-to-end; the "when NOT to use" guidance (§2.4) MUST be
+  prominent.
+- **NFR7 — Documentation.** Concepts, install (Helm + manifests + RBAC), security
+  hardening, CRD reference, secret-backend integration guides (ESO/native/Sealed/
+  Vault/CSI), rollout/reload cookbook, troubleshooting.
 - **NFR8 — Licensing.** Permissive OSI license (recommended Apache-2.0) with
   contribution guide and code of conduct.
 - **NFR9 — Testing.** Unit + integration (real git server, envtest/`kind`) + e2e
-  covering both modes, the config/secret split, oversize handling, and the
-  failure modes in §14. CI gates merges.
+  covering config sync, each secret backend (ESO first), SHA-matched rollout
+  idempotency, oversize handling, and the failure modes in §13. CI gates merges.
 - **NFR10 — Versioning.** SemVer for artifacts; documented CRD deprecation policy;
   breaking CRD changes require a new API version with conversion.
 
 ---
 
-## 17. Configuration & CLI Reference
+## 15. CLI Reference
 
-- **Sidecar mode** — configured by environment variables (§10).
-- **Operator mode** — configured by `ConfigSource`/`ConfigSync` (§12) plus a
-  controller config file (leader election, metrics, concurrency).
+- **Operator** — configured by `ConfigSync` (§11) plus a controller config file
+  (leader election, metrics, concurrency, secret-backend enablement).
 - **`kohenctl` (optional helper, SHOULD).**
-  - `kohenctl status <sync>` — config version, applied objects, convergence (UC7).
+  - `kohenctl status <sync>` — desired/stamped versions, resolution state, rollout
+    (UC7).
   - `kohenctl diff <sync>` — diff between applied and latest (secrets redacted,
-    R8.7).
+    R8.3).
   - `kohenctl pin <sync> <sha>` / `kohenctl rollback <sync>` — set version (UC6).
-  - `kohenctl verify <repo@branch:path>` — validate layout/signatures locally.
+  - `kohenctl verify <repo@branch:path>` — validate layout/references/signatures.
 
 ---
 
-## 18. Milestones / Phased Roadmap
+## 16. Milestones / Phased Roadmap
 
 Ordered by dependency, not calendar. Each milestone is independently shippable.
 
 - **M0 — Spec & foundations (this document).** Requirements, glossary,
   architecture; repo scaffolding, license, CI skeleton.
-- **M1 — Sidecar MVP.** `kohen` init+sidecar, env-var config
-  (`KOHEN_REPO`/`BRANCH`/`PATH`, R10.1–R10.2), git fetch, config→`ConfigMap`
-  (§7.4), server-side apply + ownership + prune (T3, R8.3–R8.4), sidecar RBAC
-  manifest (R10.3), native volume reload (C0) **and the SHA-annotation rollout
-  (C4, §11.1): stamp `kohen.dev/config-sha` on the workload pod template, match
-  desired-vs-stamped, trigger a rolling update only on mismatch** (R11.4–R11.9),
-  metrics/health, fail-safe (§14). Delivers UC1, UC5.
-- **M2 — Secrets.** Config/secret split (§8.1), `ExternalSecret` (S1) and
-  `SealedSecret` (S2) apply, existing-`Secret` references (S3), fail-closed +
-  rotation-triggered rollout via the SHA stamp (R8.6, R11.4), redaction (R8.7).
-  Delivers UC3.
-- **M3 — Operator & CRDs.** `ConfigSource` + `ConfigSync`, branch→commit
-  resolution + fleet consistency (R-CONS), workload SHA matching across the fleet,
-  status/events, Helm chart. Delivers UC2, UC4, UC7 with strong consistency.
-- **M4 — Reload completeness.** Reloader annotation (C1), in-place signal/HTTP
-  hooks (C2, C3), rollback (UC6, R-ROLLBACK) via prior-SHA stamp, `kohenctl`.
-- **M5 — Injection & webhooks.** Optional sidecar auto-injection (R12.4),
-  git-webhook-triggered syncs, signed-commit verification.
-- **M6 — Advanced.** Overlay/light templating (§7.4), `ConfigMap` splitting for
-  large config, progressive rollout strategies, tracing, image signing/SBOM.
+- **M1 — Operator MVP.** `ConfigSync` CRD, git fetch + branch→commit resolution,
+  config→`ConfigMap` (§7.4), server-side apply + ownership + prune (T3), and the
+  **SHA-matched rollout** (R-ROLLOUT: stamp `kohen.dev/config-sha`, match,
+  roll out only on change) for `Deployment`/`StatefulSet`, scoped RBAC (T7),
+  metrics/health, fail-safe (§13). Delivers UC1, UC4, UC5, UC7.
+- **M2 — Secret resolution (ESO first).** Secret references (§8), assume-exists/
+  reconcile (P3), file + env surfacing (§8.4), `ExternalSecret` integration (apply
+  + await `Ready`), fail-closed (R8.4), rotation→rollout (R8.5), redaction (R8.3).
+  Delivers UC2, UC3.
+- **M3 — More secret backends.** Native `Secret`, Sealed Secrets, then Vault
+  (Injector/CSI) and the Secrets Store CSI driver via the same model (§8.3).
+- **M4 — Ecosystem & ergonomics.** Reloader interop (C1), `kohenctl`, rollback
+  polish (R-ROLLBACK), overlay/light templating (§7.4), `DaemonSet` support.
+- **M5 — Acceleration & hardening.** Git-webhook-triggered syncs, signed-commit
+  verification, progressive rollout strategies, tracing, image signing/SBOM.
+- **M6 (candidate) — Sidecar/env-var mode.** Revisit the deferred per-workload
+  sidecar with env-var configuration (N6) if demand warrants (§18).
 
 ---
 
-## 19. Acceptance Criteria
+## 17. Acceptance Criteria
 
-- **A1** A pod with the Kohen sidecar and only `KOHEN_REPO`/`KOHEN_BRANCH`/
-  `KOHEN_PATH` set produces and maintains the expected `ConfigMap`, verified in an
-  e2e `kind` test (R10.1–R10.2).
+- **A1** A minimal `ConfigSync` (source + path + `workloadRef`) produces and
+  maintains the expected `ConfigMap`, verified in an e2e `kind` test (UC1).
 - **A2** Committing a change updates the `ConfigMap`; a mounted-volume consumer
-  observes it (C0) and a Reloader-annotated consumer restarts (C1).
-- **A2b** With the rollout contract (C4): a commit stamps the new config git SHA
-  on the `Deployment`/`StatefulSet` pod template and triggers exactly one rolling
-  update; a subsequent reconcile with an unchanged SHA triggers **no** rollout
-  (idempotent match, R11.4–R11.6); the deployed version is readable from workload
-  metadata (R-VERSION, UC7).
-- **A3** A git outage does not delete/corrupt objects or crash the workload;
-  status shows `Degraded`; recovery re-applies automatically (T8, §14).
-- **A4** From one path, config lands in a `ConfigMap` and a secret is delivered via
-  an applied `ExternalSecret` (ESO-populated) with **no plaintext in git**, logs,
-  events, status, or CLI (§8, R8.7).
-- **A5** An unresolved secret fails closed (last-good kept, `Degraded`, event);
-  rotating the backing secret advances the config version and drives the reload
-  contract (R8.6).
-- **A6** In operator mode, all consumers of a `ConfigSync` converge to objects from
-  a single resolved commit (R-CONS); status reports it (UC7).
-- **A7** Deleting a `ConfigSync`/sidecar prunes only Kohen-owned objects and never
-  deletes the workload (R8.4, R12.3).
-- **A8** Producing an oversize object fails closed with an actionable error rather
-  than a partial/rejected apply (T-LIMIT).
-- **A9** The sidecar runs as non-root on a read-only root filesystem within the
-  documented footprint (T6, T7).
+  observes it (C0).
+- **A3** With the rollout contract: a commit stamps the new config git SHA on the
+  `Deployment`/`StatefulSet` pod template and triggers exactly one rolling update;
+  a reconcile with an unchanged SHA triggers **no** rollout (R-ROLLOUT idempotency,
+  R-VERSION); the deployed version is readable from workload metadata (UC7).
+- **A4** Config references a secret backed by an `ExternalSecret`; Kohen awaits it,
+  wires the resulting `Secret` into the workload via the requested mechanic, with
+  **no plaintext in git/logs/events/status/CLI** (§8, R8.3), verified e2e with ESO.
+- **A5** An unresolved secret fails closed: last-good kept, `Pending`/`Degraded`,
+  event, **no stamp/rollout** (R8.4); once the secret appears, Kohen resolves and
+  rolls out; rotating an env-surfaced secret advances the version and rolls out
+  (R8.5).
+- **A6** A native `Secret` and a Sealed Secret resolve through the same model
+  (§8.3) and surface correctly as file and env.
+- **A7** Deleting a `ConfigSync` prunes only Kohen-owned objects and Kohen-added
+  workload wiring; the workload and un-owned secrets are untouched (R11.3–R11.4).
+- **A8** Producing an oversize `ConfigMap` fails closed with an actionable error
+  (T-LIMIT).
+- **A9** The operator runs as non-root, read-only rootfs, with least-privilege
+  RBAC (only referenced secrets/namespaces, target ConfigMap, target workloads)
+  (T7).
 
 ---
 
-## 20. Open Questions
+## 18. Open Questions
 
-1. **Sidecar multi-replica coordination.** Idempotent last-writer-wins is simple
-   but produces redundant API writes across replicas. Do we add optional leader
-   election among a workload's Kohen sidecars, or firmly steer multi-replica
-   production to operator mode?
-2. **Object naming/derivation defaults.** How should the default `ConfigMap`/
-   `Secret` names be derived in sidecar mode (workload name? pod owner? a fixed
-   suffix?) to be predictable and collision-safe?
-3. **Config/secret split ergonomics.** Is the `secrets/` convention + `kohen.yaml`
-   mapping the right default, or should Kohen only ever apply explicit secret
-   manifests (`ExternalSecret`/`SealedSecret`) committed to git and never infer?
-4. **Adopting pre-existing objects.** Default is to never touch un-owned objects
-   (R8.5). Is opt-in adoption needed for migration from hand-authored objects?
-5. **ESO readiness coupling.** Block applying the config version until the
-   `ExternalSecret` is `Ready` (safer) vs. proceed if a prior `Secret` exists
-   (more available)? (R8.6 vs. NFR1.)
-6. **Direct-file-volume mode (deferred, N5).** Is there enough demand for very
-   large config trees to justify a future volume-target mode alongside the object
-   model?
-7. **Webhook ingress topology.** Supported relay model for git webhooks in
-   restricted-egress clusters.
+1. **Workload wiring ownership.** Kohen injects owned volumes/mounts/env into the
+   target pod spec (§6.2, §8.4). Is mutating the workload acceptable to all users,
+   or should there be a "produce objects only; author wires them" mode where Kohen
+   just stamps + rolls out?
+2. **ESO readiness coupling.** Block stamping until the `ExternalSecret` is `Ready`
+   (safer) vs. proceed if a prior `Secret` exists (more available)? (R8.4 vs.
+   NFR1.)
+3. **Secret creation vs. assume-exists.** When git contains an `ExternalSecret`/
+   `SealedSecret`, should Kohen always apply it (own its lifecycle) or only ever
+   reference/await it (never create)? Default proposed: apply if present in git,
+   else await.
+4. **Config/secret split ergonomics.** Explicit `secretRefs` only, or also a
+   `secrets/` convention that infers references?
+5. **Env-surfaced secret rotation.** Env values need a restart to update; is
+   auto-rollout on env-secret rotation always desired, or opt-in?
+6. **Default object/annotation naming.** Derivation of default `ConfigMap` name and
+   confirmation of `kohen.dev/config-sha`.
+7. **Direct-file-volume mode (deferred, N5)** and **sidecar/env-var mode (deferred,
+   N6):** demand thresholds to revisit.
+8. **Webhook ingress topology** for git webhooks in restricted-egress clusters.
 
 ---
 
-## 21. Relationship to the Existing Prototype
+## 19. Relationship to the Existing Prototype
 
 The repository contains an early `kohen-agent` prototype (Go + `go-git`) that
 clones a repo into a target **directory** via `--gitUrl`/`--gitPath`/
-`--targetDir`, and reads matching env vars. It validates the fetch-from-git and
-env-var-configuration premises and maps onto the **sidecar init** phase of **M1**
-— except the target evolves from a filesystem directory to native
-`ConfigMap`/`Secret` **objects** (the v0.3 core model). The prototype's env vars
-are retained as deprecated aliases (§10).
+`--targetDir` (and matching env vars). It validates the git-fetch premise and the
+env-var configuration ergonomics. In v0.4 the **operator** is the delivery
+vehicle: the prototype's fetch logic maps onto the operator's fetch/resolve step,
+while the target evolves from a filesystem directory to a native `ConfigMap` plus
+resolved secret wiring and a SHA-matched rollout. The prototype's env-var
+interface is the seed for the **deferred** sidecar mode (N6, §18).
 
 ---
 
 ## Appendix A — Requirement Index
 
-Requirements are labeled inline (`Rn.n`, `R-*`, `Tn`, `Cn`, `An`, `Gn`, `Nn`,
-`NFRn`, `UCn`) so implementation PRs and tests can reference them directly. An
-implementation is spec-conformant for a milestone (§18) when all requirements
-reachable from that milestone's capabilities and their acceptance criteria (§19)
+Requirements are labeled inline (`Rn.n`, `R-*`, `Tn`, `Gn`, `Nn`, `NFRn`, `An`,
+`UCn`, `Pn`) so implementation PRs and tests can reference them directly. An
+implementation is spec-conformant for a milestone (§16) when all requirements
+reachable from that milestone's capabilities and their acceptance criteria (§17)
 are satisfied and demonstrated by automated tests (NFR9).
