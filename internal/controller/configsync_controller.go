@@ -32,6 +32,7 @@ import (
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/rollout"
 	"github.com/ozimakov/kohen/internal/secret"
+	"github.com/ozimakov/kohen/internal/secret/native"
 	"github.com/ozimakov/kohen/internal/wire"
 )
 
@@ -262,11 +263,14 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	if mountPath == "" {
 		mountPath = "/etc/kohen/config"
 	}
+	files, envs := secretSurfaces(cs)
 	spec := wire.Spec{
 		Kind: kind, Name: name, Namespace: ns,
-		Container: cs.Spec.Wiring.Container,
-		MountPath: mountPath,
-		ConfigMap: cmName,
+		Container:   cs.Spec.Wiring.Container,
+		MountPath:   mountPath,
+		ConfigMap:   cmName,
+		SecretFiles: files,
+		SecretEnv:   envs,
 	}
 	if cs.Spec.Rollout != kohenv1alpha1.RolloutNone {
 		spec.ConfigSHA = version // auto: stamp the pod template (triggers rollout)
@@ -496,10 +500,14 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Renderer = render.New(render.Options{})
 	}
 	if r.Resolvers == nil {
-		// Backend resolvers are registered by later steps (native — S2.3; ESO —
-		// S2.4). An unregistered backend resolves to BackendNotReady, failing
-		// closed rather than silently wiring nothing.
-		r.Resolvers = map[secret.Backend]secret.Resolver{}
+		// Register the native backend (S2.3); ESO is added in S2.4. An
+		// unregistered backend resolves to BackendNotReady, failing closed
+		// rather than silently wiring nothing. The native resolver reads via
+		// the uncached API reader so arbitrary referenced Secrets can be read
+		// on demand without caching all Secret material (TM8, T6).
+		r.Resolvers = map[secret.Backend]secret.Resolver{
+			secret.BackendNativeSecret: native.New(mgr.GetAPIReader()),
+		}
 	}
 	if r.Fetcher == nil {
 		// Wire a real resolver so hostname-based SSRF is guarded, not only

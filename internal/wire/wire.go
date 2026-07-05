@@ -28,6 +28,17 @@ const FieldManager = "kohen"
 // VolumeName is the deterministic name of the Kohen-injected config volume.
 const VolumeName = "kohen-config"
 
+// secretVolumePrefix namespaces file-surfaced secret volumes so they never
+// collide with the config volume or unrelated workload volumes.
+const secretVolumePrefix = "kohen-secret-"
+
+// SecretVolumeName returns the deterministic volume name for a file-surfaced
+// secret reference. refName is a DNS-1123 label (≤50 chars, enforced by the
+// API), so the result stays within the 63-char volume-name limit.
+func SecretVolumeName(refName string) string {
+	return secretVolumePrefix + refName
+}
+
 // Reason classifies wiring errors for WorkloadWired status mapping (§11.4).
 type Reason string
 
@@ -63,6 +74,30 @@ func ReasonOf(err error) (Reason, bool) {
 	return "", false
 }
 
+// SecretFile is a file-surfaced secret reference: the backing Secret is mounted
+// as a volume at MountPath in the target container (SPEC §8.4). Kohen never
+// uses subPath, so kubelet delivers rotations in place (R8.5).
+type SecretFile struct {
+	// RefName is the ConfigSync-local reference name; it yields the
+	// deterministic volume name via SecretVolumeName.
+	RefName string
+	// SecretName is the backing Secret to mount.
+	SecretName string
+	// MountPath is where the Secret is mounted in the target container.
+	MountPath string
+}
+
+// SecretEnv is an env-surfaced secret reference: a discrete env entry with
+// valueFrom.secretKeyRef (SPEC §8.4, R-WIRE.2 — never envFrom).
+type SecretEnv struct {
+	// EnvVar is the environment variable name injected into the container.
+	EnvVar string
+	// SecretName is the backing Secret.
+	SecretName string
+	// Key is the Secret data key exposed via the env var.
+	Key string
+}
+
 // Spec describes the desired wiring for a workload.
 type Spec struct {
 	Kind      string // Deployment | StatefulSet
@@ -74,6 +109,10 @@ type Spec struct {
 	// ConfigSHA, when non-empty, is stamped as the kohen.dev/config-sha pod
 	// template annotation (version stamp; S1.7).
 	ConfigSHA string
+	// SecretFiles are file-surfaced secret references mounted as volumes.
+	SecretFiles []SecretFile
+	// SecretEnv are env-surfaced secret references injected as env entries.
+	SecretEnv []SecretEnv
 }
 
 // Wirer performs workload wiring via SSA.
@@ -157,26 +196,50 @@ func (w *Wirer) Wire(ctx context.Context, s Spec) error {
 	}
 
 	obj := w.base(gvk, s.Namespace, s.Name)
+
+	// Volumes: the config ConfigMap plus one Secret volume per file surface.
+	volumes := []any{
+		map[string]any{
+			"name":      VolumeName,
+			"configMap": map[string]any{"name": s.ConfigMap},
+		},
+	}
+	// VolumeMounts on the target container: the config mount plus each secret
+	// file mount. SSA merges these by name/mountPath so Kohen co-owns exactly
+	// its entries alongside another manager's (R-WIRE.2, R-WIRE.4).
+	mounts := []any{
+		map[string]any{
+			"name":      VolumeName,
+			"mountPath": s.MountPath,
+		},
+	}
+	for _, f := range s.SecretFiles {
+		vol := SecretVolumeName(f.RefName)
+		volumes = append(volumes, map[string]any{
+			"name":   vol,
+			"secret": map[string]any{"secretName": f.SecretName},
+		})
+		mounts = append(mounts, map[string]any{
+			"name":      vol,
+			"mountPath": f.MountPath,
+			"readOnly":  true,
+		})
+	}
+
+	targetContainer := map[string]any{
+		"name":         container,
+		"volumeMounts": mounts,
+	}
+	// Env: discrete entries with valueFrom.secretKeyRef, merged by name.
+	if env := secretEnvEntries(s.SecretEnv); len(env) > 0 {
+		targetContainer["env"] = env
+	}
+
 	spec := map[string]any{
 		"template": map[string]any{
 			"spec": map[string]any{
-				"volumes": []any{
-					map[string]any{
-						"name":      VolumeName,
-						"configMap": map[string]any{"name": s.ConfigMap},
-					},
-				},
-				"containers": []any{
-					map[string]any{
-						"name": container,
-						"volumeMounts": []any{
-							map[string]any{
-								"name":      VolumeName,
-								"mountPath": s.MountPath,
-							},
-						},
-					},
-				},
+				"volumes":    volumes,
+				"containers": []any{targetContainer},
 			},
 		},
 	}
@@ -212,6 +275,28 @@ func (w *Wirer) Unwire(ctx context.Context, kind, ns, name string) error {
 
 	obj := w.base(gvk, ns, name)
 	return w.apply(ctx, obj, "unwiring workload")
+}
+
+// secretEnvEntries builds the SSA-mergeable env[] entries for env-surfaced
+// secrets. Each entry uses valueFrom.secretKeyRef so the value is delivered by
+// the kubelet and never passes through Kohen (R8.3, R-WIRE.2).
+func secretEnvEntries(envs []SecretEnv) []any {
+	if len(envs) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(envs))
+	for _, e := range envs {
+		out = append(out, map[string]any{
+			"name": e.EnvVar,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{
+					"name": e.SecretName,
+					"key":  e.Key,
+				},
+			},
+		})
+	}
+	return out
 }
 
 func (w *Wirer) base(gvk schema.GroupVersionKind, ns, name string) *unstructured.Unstructured {

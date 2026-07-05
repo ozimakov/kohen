@@ -11,6 +11,7 @@ import (
 	"github.com/ozimakov/kohen/internal/config"
 	"github.com/ozimakov/kohen/internal/metrics"
 	"github.com/ozimakov/kohen/internal/secret"
+	"github.com/ozimakov/kohen/internal/wire"
 )
 
 // resolveSecrets runs the resolution framework over spec.secretRefs, sets the
@@ -99,6 +100,32 @@ func markSecretsEstablished(cs *kohenv1alpha1.ConfigSync) {
 	for i := range cs.Status.SecretRefs {
 		cs.Status.SecretRefs[i].Established = true
 	}
+}
+
+// secretSurfaces translates resolved secret references into wire surfaces
+// (SPEC §8.4). It is invoked only after the aggregate decision is AllReady, so
+// every backing Secret is known to exist; the backing Secret name is the
+// reference's SecretName (native: the Secret; ESO: the target Secret, which
+// shares the ExternalSecret name by default).
+func secretSurfaces(cs *kohenv1alpha1.ConfigSync) (files []wire.SecretFile, envs []wire.SecretEnv) {
+	for i := range cs.Spec.SecretRefs {
+		ref := &cs.Spec.SecretRefs[i]
+		switch ref.Surface.As {
+		case kohenv1alpha1.SurfaceFile:
+			files = append(files, wire.SecretFile{
+				RefName:    ref.Name,
+				SecretName: ref.SecretName(),
+				MountPath:  ref.Surface.MountPath,
+			})
+		case kohenv1alpha1.SurfaceEnv:
+			envs = append(envs, wire.SecretEnv{
+				EnvVar:     ref.Surface.EnvVar,
+				SecretName: ref.SecretName(),
+				Key:        ref.Surface.Key,
+			})
+		}
+	}
+	return files, envs
 }
 
 // knownResolveReason bounds the SecretResolveErrors metric label to the §11.4

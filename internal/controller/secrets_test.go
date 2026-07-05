@@ -7,6 +7,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -22,6 +23,7 @@ import (
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/secret"
 	fakesecret "github.com/ozimakov/kohen/internal/secret/fake"
+	"github.com/ozimakov/kohen/internal/secret/native"
 	"github.com/ozimakov/kohen/internal/testenv"
 	"github.com/ozimakov/kohen/internal/wire"
 	"github.com/ozimakov/kohen/test/leakcheck"
@@ -405,5 +407,162 @@ func TestSecretNewRefFailsClosedKeepsLastGood(t *testing.T) {
 	// Last-good preserved: stamp unchanged.
 	if got := podTemplateStamp(t, env, "growapp"); got != goodStamp {
 		t.Errorf("last-good stamp changed while a new ref was unresolved: %q -> %q", goodStamp, got)
+	}
+}
+
+// getDeploy fetches the named Deployment for surface assertions.
+func getDeploy(t *testing.T, env *testenv.Env, name string) *appsv1.Deployment {
+	t.Helper()
+	d := &appsv1.Deployment{}
+	if err := env.Client.Get(context.Background(), client.ObjectKey{Name: name, Namespace: "default"}, d); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	return d
+}
+
+// TestSecretFileSurfaceReachesWorkload: a resolved file reference is mounted as
+// a read-only Secret volume in the target container (SPEC §8.4, S2.3).
+func TestSecretFileSurfaceReachesWorkload(t *testing.T) {
+	env := testenv.Start(t)
+	makeDeployment(t, env, "wfileapp")
+	refs := []kohenv1alpha1.SecretReference{fileRef("tls", "tls-secret", "/etc/tls")}
+	cs := makeConfigSyncWithRefs(t, env, "wfilesync", "wfileapp", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	fake := fakesecret.New().SetReady("tls-secret", "rv-1")
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "abababababab0000"}, fake)
+	reconcileN(t, r, key, 2)
+
+	d := getDeploy(t, env, "wfileapp")
+	vol := wire.SecretVolumeName("tls")
+	var mounted bool
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.Name == vol && v.Secret != nil && v.Secret.SecretName == "tls-secret" {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Fatalf("secret volume not injected: %+v", d.Spec.Template.Spec.Volumes)
+	}
+	main := d.Spec.Template.Spec.Containers[0]
+	var found bool
+	for _, m := range main.VolumeMounts {
+		if m.Name == vol && m.MountPath == "/etc/tls" && m.ReadOnly {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("secret mount not injected read-only: %+v", main.VolumeMounts)
+	}
+}
+
+// TestSecretEnvSurfaceReachesWorkload: a resolved env reference is injected as a
+// discrete env entry with valueFrom.secretKeyRef (SPEC §8.4, R-WIRE.2).
+func TestSecretEnvSurfaceReachesWorkload(t *testing.T) {
+	env := testenv.Start(t)
+	makeDeployment(t, env, "wenvapp")
+	refs := []kohenv1alpha1.SecretReference{envRef("db", "db-secret", "DB_PASSWORD", "password")}
+	cs := makeConfigSyncWithRefs(t, env, "wenvsync", "wenvapp", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	fake := fakesecret.New().SetReady("db-secret", "rv-1")
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "cdcdcdcdcdcd0000"}, fake)
+	reconcileN(t, r, key, 2)
+
+	d := getDeploy(t, env, "wenvapp")
+	main := d.Spec.Template.Spec.Containers[0]
+	var e *corev1.EnvVar
+	for i := range main.Env {
+		if main.Env[i].Name == "DB_PASSWORD" {
+			e = &main.Env[i]
+		}
+	}
+	if e == nil || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("env entry not injected via secretKeyRef: %+v", main.Env)
+	}
+	if e.ValueFrom.SecretKeyRef.Name != "db-secret" || e.ValueFrom.SecretKeyRef.Key != "password" {
+		t.Errorf("secretKeyRef = %+v, want db-secret/password", e.ValueFrom.SecretKeyRef)
+	}
+	if e.Value != "" {
+		t.Errorf("env entry must not carry an inline value: %q", e.Value)
+	}
+}
+
+// TestSecretSurfaceEndToEndNative exercises the real native resolver against an
+// actual Secret: resolution → surfacing → version folding, with a leak scan
+// over the workload and status (S2.3, R8.3).
+func TestSecretSurfaceEndToEndNative(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "e2eapp")
+	value := "top-secret-password"
+	if err := env.Client.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-secret", Namespace: "default"},
+		Data:       map[string][]byte{"password": []byte(value)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refs := []kohenv1alpha1.SecretReference{envRef("db", "e2e-secret", "DB_PASSWORD", "password")}
+	cs := makeConfigSyncWithRefs(t, env, "e2esync", "e2eapp", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "e2e0e2e0e2e00000"}, native.New(env.Client))
+	reconcileN(t, r, key, 2)
+
+	cs = getCS(t, env, key)
+	if condStatus(cs, kohenv1alpha1.ConditionSecretsReady) != metav1.ConditionTrue {
+		t.Fatalf("SecretsReady should be True with a real resolvable secret: %+v", cs.Status.Conditions)
+	}
+	stamp := podTemplateStamp(t, env, "e2eapp")
+	if !strings.HasPrefix(stamp, "git:e2e0e2e0e2e0-sec:") {
+		t.Errorf("stamp = %q, want env-folded version", stamp)
+	}
+	d := getDeploy(t, env, "e2eapp")
+	main := d.Spec.Template.Spec.Containers[0]
+	if len(main.Env) == 0 || main.Env[0].ValueFrom == nil {
+		t.Errorf("env not wired end-to-end: %+v", main.Env)
+	}
+
+	// No secret value may appear in the workload or status (R8.3/TM9).
+	scan := leakcheck.New(value)
+	scan.AssertObjectClean(t, "deployment", d)
+	scan.AssertObjectClean(t, "configsync status", cs)
+}
+
+// TestSecretMissingKeyFailsClosedNative: the native resolver reports KeyMissing
+// for an env reference whose key is absent, failing closed (R8.4/A5).
+func TestSecretMissingKeyFailsClosedNative(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "keyapp")
+	if err := env.Client.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "key-secret", Namespace: "default"},
+		Data:       map[string][]byte{"other": []byte("x")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refs := []kohenv1alpha1.SecretReference{envRef("db", "key-secret", "DB", "password")}
+	cs := makeConfigSyncWithRefs(t, env, "keysync", "keyapp", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "fefefefefefe0000"}, native.New(env.Client))
+	reconcileN(t, r, key, 2)
+
+	cs = getCS(t, env, key)
+	// First-resolution failure fails closed: the aggregate condition reports
+	// AwaitingFirstResolution while the specific KeyMissing reason surfaces on
+	// the per-reference status.
+	if secretsReadyReason(cs) != kohenv1alpha1.ReasonAwaitingFirstResolution {
+		t.Errorf("SecretsReady reason = %q, want AwaitingFirstResolution", secretsReadyReason(cs))
+	}
+	if len(cs.Status.SecretRefs) != 1 || cs.Status.SecretRefs[0].Reason != kohenv1alpha1.ReasonKeyMissing {
+		t.Errorf("per-ref reason = %+v, want KeyMissing", cs.Status.SecretRefs)
+	}
+	if got := podTemplateStamp(t, env, "keyapp"); got != "" {
+		t.Errorf("workload stamped despite missing key: %q", got)
 	}
 }

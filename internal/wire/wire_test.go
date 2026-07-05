@@ -222,6 +222,144 @@ func TestUnwireMissingWorkloadIsNoOp(t *testing.T) {
 	}
 }
 
+func findMount(c *corev1.Container, path string) *corev1.VolumeMount {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].MountPath == path {
+			return &c.VolumeMounts[i]
+		}
+	}
+	return nil
+}
+
+func findEnv(c *corev1.Container, name string) *corev1.EnvVar {
+	for i := range c.Env {
+		if c.Env[i].Name == name {
+			return &c.Env[i]
+		}
+	}
+	return nil
+}
+
+// TestWireSecretFileSurface mounts a file-surfaced secret as a read-only volume
+// alongside the config volume (SPEC §8.4).
+func TestWireSecretFileSurface(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	if err := env.Client.Create(ctx, deployment("secfile",
+		corev1.Container{Name: "main", Image: "nginx:1"})); err != nil {
+		t.Fatal(err)
+	}
+	w := wire.New(env.Client)
+	if err := w.Wire(ctx, wire.Spec{
+		Kind: "Deployment", Name: "secfile", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+		SecretFiles: []wire.SecretFile{{RefName: "tls", SecretName: "tls-secret", MountPath: "/etc/tls"}},
+	}); err != nil {
+		t.Fatalf("wire: %v", err)
+	}
+	d := getDeploy(t, env, "secfile")
+	vol := wire.SecretVolumeName("tls")
+	if !hasVolume(d, vol) {
+		t.Fatalf("secret volume %q not injected: %+v", vol, d.Spec.Template.Spec.Volumes)
+	}
+	var found bool
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.Name == vol {
+			found = true
+			if v.Secret == nil || v.Secret.SecretName != "tls-secret" {
+				t.Errorf("secret volume source = %+v, want secret tls-secret", v.VolumeSource)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("secret volume missing")
+	}
+	main := findContainer(d, "main")
+	m := findMount(main, "/etc/tls")
+	if m == nil || m.Name != vol || m.ReadOnly != true {
+		t.Errorf("secret mount not injected read-only: %+v", main.VolumeMounts)
+	}
+	// The config mount still exists.
+	if findMount(main, "/etc/kohen/config") == nil {
+		t.Errorf("config mount lost: %+v", main.VolumeMounts)
+	}
+}
+
+// TestWireSecretEnvSurface injects an env-surfaced secret as a discrete env
+// entry with valueFrom.secretKeyRef (R-WIRE.2 — never envFrom).
+func TestWireSecretEnvSurface(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	if err := env.Client.Create(ctx, deployment("secenv",
+		corev1.Container{Name: "main", Image: "nginx:1"})); err != nil {
+		t.Fatal(err)
+	}
+	w := wire.New(env.Client)
+	if err := w.Wire(ctx, wire.Spec{
+		Kind: "Deployment", Name: "secenv", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+		SecretEnv: []wire.SecretEnv{{EnvVar: "DB_PASSWORD", SecretName: "db-secret", Key: "password"}},
+	}); err != nil {
+		t.Fatalf("wire: %v", err)
+	}
+	d := getDeploy(t, env, "secenv")
+	main := findContainer(d, "main")
+	e := findEnv(main, "DB_PASSWORD")
+	if e == nil || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("env entry not injected via secretKeyRef: %+v", main.Env)
+	}
+	if e.ValueFrom.SecretKeyRef.Name != "db-secret" || e.ValueFrom.SecretKeyRef.Key != "password" {
+		t.Errorf("secretKeyRef = %+v, want db-secret/password", e.ValueFrom.SecretKeyRef)
+	}
+	if e.Value != "" {
+		t.Errorf("env entry must not carry an inline value: %q", e.Value)
+	}
+}
+
+// TestWireSecretSurfacePruneOnRemoval verifies that dropping a secret ref from
+// the wire spec retracts exactly its volume/mount/env (SSA prune of owned
+// fields), leaving the config wiring intact (R-WIRE.6 semantics).
+func TestWireSecretSurfacePruneOnRemoval(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	if err := env.Client.Create(ctx, deployment("secprune",
+		corev1.Container{Name: "main", Image: "nginx:1"})); err != nil {
+		t.Fatal(err)
+	}
+	w := wire.New(env.Client)
+	full := wire.Spec{
+		Kind: "Deployment", Name: "secprune", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+		SecretFiles: []wire.SecretFile{{RefName: "tls", SecretName: "tls-secret", MountPath: "/etc/tls"}},
+		SecretEnv:   []wire.SecretEnv{{EnvVar: "DB_PASSWORD", SecretName: "db-secret", Key: "password"}},
+	}
+	if err := w.Wire(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+	// Re-wire without the secret surfaces.
+	if err := w.Wire(ctx, wire.Spec{
+		Kind: "Deployment", Name: "secprune", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := getDeploy(t, env, "secprune")
+	if hasVolume(d, wire.SecretVolumeName("tls")) {
+		t.Errorf("secret volume not pruned: %+v", d.Spec.Template.Spec.Volumes)
+	}
+	main := findContainer(d, "main")
+	if findMount(main, "/etc/tls") != nil {
+		t.Errorf("secret mount not pruned: %+v", main.VolumeMounts)
+	}
+	if findEnv(main, "DB_PASSWORD") != nil {
+		t.Errorf("secret env not pruned: %+v", main.Env)
+	}
+	// Config wiring survives.
+	if !hasVolume(d, wire.VolumeName) || findMount(main, "/etc/kohen/config") == nil {
+		t.Errorf("config wiring lost during prune: %+v", d.Spec.Template.Spec)
+	}
+}
+
 // TestWireCoexistsWithOtherManager verifies Kohen wires without disturbing
 // fields owned by a different SSA manager (GitOps coexistence, R-WIRE.4).
 func TestWireCoexistsWithOtherManager(t *testing.T) {
