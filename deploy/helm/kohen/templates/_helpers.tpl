@@ -65,6 +65,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets"]
   verbs: ["get", "list", "watch", "patch"]
+# ExternalSecret apply-if-present + await/resolve (Phase 2, SPEC §8.2/§8.3).
+# Kohen applies (owns + prunes) recognized ExternalSecret manifests found in
+# git and reads them to gate readiness; it never reads the backing Secret
+# material via this role beyond the secrets get/list/watch above.
+- apiGroups: ["external-secrets.io"]
+  resources: ["externalsecrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end -}}
 
 {{/* Leader-election needs lease access in the operator's own namespace. */}}

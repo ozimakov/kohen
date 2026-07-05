@@ -23,8 +23,9 @@ type Config struct {
 	// means "no operator restriction" (per-tenant validation still applies).
 	SourceAllowList []string `json:"sourceAllowList,omitempty"`
 
-	// SecretStoreAllowList restricts permissible secret backends/stores
-	// (SPEC R-AUTH.4). Reserved for Phase 2; parsed now for forward-compat.
+	// SecretStoreAllowList restricts permissible ExternalSecret secret stores
+	// by name (SPEC R-AUTH.4). Empty means no store restriction. Enforced by
+	// the apply-if-present manifest guard rails (internal/manifest.Guard).
 	SecretStoreAllowList []string `json:"secretStoreAllowList,omitempty"`
 
 	// MaxDegradedDuration bounds degraded (last-known-good) serving (R8.11).
