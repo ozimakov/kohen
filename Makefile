@@ -10,6 +10,13 @@ GOBIN ?= $(shell $(GO) env GOPATH)/bin
 GOLANGCI_LINT_VERSION ?= v1.61.0
 GOLANGCI_LINT ?= $(GOBIN)/golangci-lint
 
+CONTROLLER_GEN_VERSION ?= v0.16.5
+CONTROLLER_GEN ?= $(GOBIN)/controller-gen
+
+ENVTEST_VERSION ?= release-0.19
+ENVTEST ?= $(GOBIN)/setup-envtest
+ENVTEST_K8S_VERSION ?= 1.31.0
+
 .DEFAULT_GOAL := help
 
 ##@ General
@@ -28,9 +35,35 @@ tidy: ## Ensure go.mod/go.sum are tidy.
 build: ## Build all packages.
 	$(GO) build ./...
 
+##@ Code generation
+
+.PHONY: generate
+generate: $(CONTROLLER_GEN) ## Generate deepcopy code.
+	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
+
+.PHONY: manifests
+manifests: $(CONTROLLER_GEN) ## Generate CRD manifests.
+	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
+
+$(CONTROLLER_GEN):
+	GOBIN=$(GOBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
+$(ENVTEST):
+	GOBIN=$(GOBIN) $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+
+.PHONY: envtest-assets
+envtest-assets: $(ENVTEST) ## Print the KUBEBUILDER_ASSETS path (downloads envtest binaries).
+	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path
+
+##@ Testing
+
 .PHONY: test
-test: ## Run unit and integration tests with the race detector.
+test: ## Run unit tests with the race detector (envtest tiers skip without assets).
 	$(GO) test -race -count=1 ./...
+
+.PHONY: test-integration
+test-integration: $(ENVTEST) ## Run all tests including envtest (Tier 2).
+	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GO) test -race -count=1 ./...
 
 .PHONY: cover
 cover: ## Run tests and produce a coverage profile.

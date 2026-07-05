@@ -37,9 +37,25 @@ jobs:
         with:
           version: v1.61.0
 
+  generate:
+    name: Codegen up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Regenerate deepcopy + CRDs
+        run: make generate manifests
+      - name: Fail if generated files are stale
+        run: git diff --exit-code
+
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    env:
+      ENVTEST_K8S_VERSION: "1.31.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -50,17 +66,19 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: Set up envtest (Tier 2 assets)
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19
+          echo "KUBEBUILDER_ASSETS=$(setup-envtest use ${ENVTEST_K8S_VERSION} -p path)" >> "$GITHUB_ENV"
       - name: Vet
         run: go vet ./...
       - name: Build
         run: go build ./...
-      - name: Test (race + coverage)
+      - name: Test (race + coverage, incl. envtest)
         run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -n 1
 
 # Planned additional jobs (added with the steps that need them):
-#   * envtest (Tier 2): install sigs.k8s.io/controller-runtime/tools/setup-envtest,
-#     export KUBEBUILDER_ASSETS, run controller/API tests — arrives with S1.3+.
 #   * e2e (Tier 3): kind cluster + Helm install + real workloads — U1 milestone.
 #   * image: multi-arch (amd64/arm64) distroless build/publish — S1.4 / S3.3 (T5).
