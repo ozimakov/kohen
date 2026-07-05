@@ -245,8 +245,8 @@ action to take:
 | `WorkloadNotFound` | `WorkloadWired=False` | Create the target workload or fix `workloadRef`. |
 | `UnsupportedStrategy` | `WorkloadWired=False` | Use a rolling strategy, or `rollout: none`. |
 | `ApplyConflict` | `WorkloadWired=False` | Apply the [GitOps ignore rules](#gitops-coexistence). |
-| `SingletonViolation` | `Ready=False` | Only one `ConfigSync` may target a workload; remove the duplicate. |
-| `MaxDegradedExceeded` | `Ready=False` | Degraded past `maxDegradedDuration`; investigate the underlying `Fetched`/`Rendered`/`SecretsReady` failure. |
+| `SingletonViolation` | `WorkloadWired=False` | Only one `ConfigSync` may target a workload; remove the duplicate. |
+| `MaxDegradedExceeded` | `SecretsReady=False` | Degraded past `maxDegradedDuration`; investigate the underlying `SecretsReady` failure. |
 
 ### GitOps coexistence
 

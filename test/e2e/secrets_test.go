@@ -252,10 +252,11 @@ func assertFileSecretWired(t *testing.T, c client.Client, ns, deploy, secretName
 	})
 }
 
-// assertNoValueLeak fails if value appears in git (the committed manifests),
-// the ConfigSync status, or any event for the object (R8.3/TM9). The value is
-// only ever legitimately present in the target Secret and the pod's mounted
-// volume/env — never in Kohen's surfaces.
+// assertNoValueLeak fails if value appears in the ConfigSync status conditions,
+// the per-reference status, or any event for the object (R8.3/TM9). The value
+// is never committed to git (only the store-referencing ExternalSecret manifest
+// is) and is only ever legitimately present in the backing/target Secret and
+// the pod's mounted volume/env — never in Kohen's surfaces.
 func assertNoValueLeak(t *testing.T, c client.Client, ns string, key client.ObjectKey, value string) {
 	t.Helper()
 	got := &kohenv1alpha1.ConfigSync{}
@@ -772,7 +773,10 @@ func TestU2AbuseCases(t *testing.T) {
 			t.Fatalf("create second: %v", err)
 		}
 		t.Cleanup(func() { _ = c.Delete(ctx, second) })
-		waitConditionReason(t, c, client.ObjectKeyFromObject(second), kohenv1alpha1.ConditionReady,
+		// The loser degrades with SingletonViolation on WorkloadWired (the Ready
+		// condition reason is the generic Degraded); a Warning event is emitted.
+		waitConditionReason(t, c, client.ObjectKeyFromObject(second), kohenv1alpha1.ConditionWorkloadWired,
 			metav1.ConditionFalse, kohenv1alpha1.ReasonSingletonViolation, 90*time.Second)
+		assertWarningEvent(t, c, ns, second.Name, kohenv1alpha1.ReasonSingletonViolation)
 	})
 }
