@@ -814,7 +814,13 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **NFR7 Documentation:** install (both RBAC scopes), Day-1 runbook, git auth,
   ESO integration, GitOps coexistence quickstart (with snippets, R-WIRE.5),
   troubleshooting (condition/reason catalog §11.4), kubectl operations
-  (§15), security hardening + threat model (§3.3, TM8).
+  (§15), security hardening + threat model (§3.3, TM8). The **README MUST carry
+  two usage sections kept current every phase**: a **Getting Started** with a
+  *minimal* configuration (fewest fields, maximum value out of the box, per §1.2
+  + defaults §11.2) and an **Advanced configuration reference** documenting
+  *every* shipped `ConfigSync`/operator field, credential key, annotation, and
+  status/condition. Each phase that adds or changes a user-visible field MUST
+  update both sections in the same change.
 - **NFR8 Licensing:** Apache-2.0, contribution guide, code of conduct.
 - **NFR9 Testing:** unit + integration (envtest, git fixture) + e2e (`kind`);
   leak tests on every PR touching reconcile/logging; abuse-case tests for
