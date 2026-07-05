@@ -59,6 +59,17 @@ func StatefulSetSupported(s *appsv1.StatefulSet) (bool, string) {
 	return true, ""
 }
 
+// DeploymentSupported reports whether a Deployment's strategy is safe to drive
+// with a version stamp. Recreate causes a full-downtime restart on every config
+// change, so Kohen refuses to stamp it and surfaces UnsupportedStrategy rather
+// than silently taking the workload down (R-ROLLOUT.5).
+func DeploymentSupported(d *appsv1.Deployment) (bool, string) {
+	if d.Spec.Strategy.Type == appsv1.RecreateDeploymentStrategyType {
+		return false, "Deployment uses the Recreate strategy, which would cause full downtime on every config change; use RollingUpdate or rollout: none"
+	}
+	return true, ""
+}
+
 // Progress describes rollout state, with a reason aligned to §11.4.
 type Progress struct {
 	Complete bool

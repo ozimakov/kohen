@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -466,6 +467,67 @@ func TestSyncNowAnnotationCleared(t *testing.T) {
 	cs = getCS(t, env, key)
 	if _, ok := cs.Annotations[kohenv1alpha1.AnnotationSyncNow]; ok {
 		t.Errorf("sync-now annotation was not cleared: %v", cs.Annotations)
+	}
+}
+
+func TestPipelineRedactsSecretsInStatusAndEvents(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "redapp")
+
+	const token = "supersecrettoken1234567890"
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gitcreds", Namespace: "default",
+			Labels: map[string]string{kohenv1alpha1.LabelGitCredential: "true"},
+		},
+		Data: map[string][]byte{"token": []byte(token)},
+	}
+	if err := env.Client.Create(ctx, sec); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := makeConfigSync(t, env, "redsync", "redapp", kohenv1alpha1.RolloutAuto)
+	cs = getCS(t, env, client.ObjectKeyFromObject(cs))
+	cs.Spec.Source.AuthSecretRef = &kohenv1alpha1.LocalObjectReference{Name: "gitcreds"}
+	if err := env.Client.Update(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(cs)
+
+	// The fetch fails with an error message that leaks the token (as a go-git
+	// error echoing a credentialed URL might).
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{
+		dir:    dir,
+		commit: "1212121212121212",
+		err:    &git.Error{Reason: git.ReasonFetchFailed, Msg: "clone https://x:" + token + "@host failed"},
+	})
+	rec := r.Recorder.(*record.FakeRecorder)
+	reconcileN(t, r, key, 2)
+
+	cs = getCS(t, env, key)
+	c := meta.FindStatusCondition(cs.Status.Conditions, kohenv1alpha1.ConditionFetched)
+	if c == nil {
+		t.Fatal("expected a Fetched condition")
+	}
+	if strings.Contains(c.Message, token) {
+		t.Errorf("token leaked into status condition message: %q", c.Message)
+	}
+	if !strings.Contains(c.Message, redact.Placeholder) {
+		t.Errorf("expected redaction placeholder in status message, got %q", c.Message)
+	}
+
+	drain := true
+	for drain {
+		select {
+		case ev := <-rec.Events:
+			if strings.Contains(ev, token) {
+				t.Errorf("token leaked into event: %q", ev)
+			}
+		default:
+			drain = false
+		}
 	}
 }
 

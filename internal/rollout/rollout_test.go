@@ -36,6 +36,23 @@ func TestStatefulSetSupported(t *testing.T) {
 	}
 }
 
+func TestDeploymentSupported(t *testing.T) {
+	rolling := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}}}
+	if s, _ := rollout.DeploymentSupported(rolling); !s {
+		t.Errorf("RollingUpdate should be supported")
+	}
+	// Empty strategy type defaults to RollingUpdate on the API server.
+	if s, _ := rollout.DeploymentSupported(&appsv1.Deployment{}); !s {
+		t.Errorf("default (empty) strategy should be supported")
+	}
+	recreate := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}}}
+	if s, msg := rollout.DeploymentSupported(recreate); s || msg == "" {
+		t.Errorf("Recreate should be unsupported")
+	}
+}
+
 func TestDeploymentProgress(t *testing.T) {
 	tests := []struct {
 		name         string

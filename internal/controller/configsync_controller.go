@@ -129,7 +129,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	// Credentials (R-AUTH.6, R8.3).
 	cred, err := r.loadCredential(ctx, cs)
 	if err != nil {
-		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, kohenv1alpha1.ReasonAuthFailed, err.Error())
+		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, kohenv1alpha1.ReasonAuthFailed, r.redactMsg(err.Error()))
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "credential error")
 		r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonAuthFailed, err.Error())
 		return ctrl.Result{}, err
@@ -144,7 +144,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	if err != nil {
 		reason := gitConditionReason(err)
 		metrics.FetchErrors.WithLabelValues(reason).Inc()
-		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, reason, err.Error())
+		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, reason, r.redactMsg(err.Error()))
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "fetch failed, serving last-good")
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		return ctrl.Result{}, err
@@ -163,7 +163,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	if err != nil {
 		reason := renderConditionReason(err)
 		metrics.RenderErrors.WithLabelValues(reason).Inc()
-		setCondition(cs, kohenv1alpha1.ConditionRendered, metav1.ConditionFalse, reason, err.Error())
+		setCondition(cs, kohenv1alpha1.ConditionRendered, metav1.ConditionFalse, reason, r.redactMsg(err.Error()))
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "render failed, serving last-good")
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		return steady, nil
@@ -175,7 +175,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	cmName := cs.Spec.ConfigMapName()
 	if err := r.Applier.Apply(ctx, cs, buildConfigMap(cs, cmName, rendered)); err != nil {
 		reason := applyConditionReason(err)
-		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, err.Error())
+		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		if reason == string(apply.ReasonAlreadyExistsNotOwned) {
 			return steady, nil // terminal until the user resolves the conflict
@@ -183,7 +183,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 		return ctrl.Result{}, err
 	}
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}, cmName); err != nil {
-		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, err.Error())
+		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -208,10 +208,13 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	ns := cs.Namespace
 	name := cs.Spec.WorkloadRef.Name
 
-	// Existence + strategy support (R-ROLLOUT.5).
-	currentStamp, reason, msg, ok := r.inspectWorkload(ctx, kind, ns, name)
+	// Existence + strategy support (R-ROLLOUT.5). Strategy guards only apply when
+	// the rollout is pod-template driven; rollout: none never triggers a restart,
+	// so OnDelete/Recreate workloads are acceptable there.
+	podTemplateRollout := cs.Spec.Rollout != kohenv1alpha1.RolloutNone
+	currentStamp, reason, msg, ok := r.inspectWorkload(ctx, kind, ns, name, podTemplateRollout)
 	if !ok {
-		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, msg)
+		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, r.redactMsg(msg))
 		r.event(cs, corev1.EventTypeWarning, reason, msg)
 		return false
 	}
@@ -231,7 +234,7 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	}
 	if err := r.Wirer.Wire(ctx, spec); err != nil {
 		reason := wireConditionReason(err)
-		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, err.Error())
+		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, r.redactMsg(err.Error()))
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		return false
 	}
@@ -239,7 +242,7 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 
 	if cs.Spec.Rollout == kohenv1alpha1.RolloutNone {
 		if err := rollout.StampNoRestart(ctx, r.Client, kind, ns, name, version); err != nil {
-			setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, err.Error())
+			setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
 			return false
 		}
 		cs.Status.WorkloadVersion = version
@@ -268,7 +271,7 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 // inspectWorkload verifies the workload exists and its strategy is supported,
 // and returns the current pod-template config-sha stamp (for rollout
 // triggered-vs-skipped accounting).
-func (r *ConfigSyncReconciler) inspectWorkload(ctx context.Context, kind, ns, name string) (stamp, reason, msg string, ok bool) {
+func (r *ConfigSyncReconciler) inspectWorkload(ctx context.Context, kind, ns, name string, podTemplateRollout bool) (stamp, reason, msg string, ok bool) {
 	key := client.ObjectKey{Namespace: ns, Name: name}
 	switch kind {
 	case "StatefulSet":
@@ -279,8 +282,10 @@ func (r *ConfigSyncReconciler) inspectWorkload(ctx context.Context, kind, ns, na
 			}
 			return "", kohenv1alpha1.ReasonDegraded, err.Error(), false
 		}
-		if supported, m := rollout.StatefulSetSupported(&ss); !supported {
-			return "", kohenv1alpha1.ReasonUnsupportedStrategy, m, false
+		if podTemplateRollout {
+			if supported, m := rollout.StatefulSetSupported(&ss); !supported {
+				return "", kohenv1alpha1.ReasonUnsupportedStrategy, m, false
+			}
 		}
 		return ss.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA], "", "", true
 	case "Deployment":
@@ -290,6 +295,13 @@ func (r *ConfigSyncReconciler) inspectWorkload(ctx context.Context, kind, ns, na
 				return "", kohenv1alpha1.ReasonWorkloadNotFound, fmt.Sprintf("Deployment %q not found", name), false
 			}
 			return "", kohenv1alpha1.ReasonDegraded, err.Error(), false
+		}
+		// A Recreate Deployment can only be stamped safely when rollout is not
+		// pod-template driven; guard it like OnDelete StatefulSets (R-ROLLOUT.5).
+		if podTemplateRollout {
+			if supported, m := rollout.DeploymentSupported(&dp); !supported {
+				return "", kohenv1alpha1.ReasonUnsupportedStrategy, m, false
+			}
 		}
 		return dp.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA], "", "", true
 	default:
@@ -398,7 +410,7 @@ func (r *ConfigSyncReconciler) setReady(cs *kohenv1alpha1.ConfigSync, status met
 
 func (r *ConfigSyncReconciler) event(cs *kohenv1alpha1.ConfigSync, eventType, reason, msg string) {
 	if r.Recorder != nil {
-		r.Recorder.Event(cs, eventType, reason, msg)
+		r.Recorder.Event(cs, eventType, reason, r.redactMsg(msg))
 	}
 }
 

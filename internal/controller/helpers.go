@@ -29,6 +29,17 @@ func setCondition(cs *kohenv1alpha1.ConfigSync, condType string, status metav1.C
 	})
 }
 
+// redactMsg strips any registered secret material from a message before it is
+// written to status, events, or logs. R8.3/TM9 requires that no secret value
+// ever appears in status or events, not only logs, so every dynamic message
+// (error text, URLs) is funnelled through the redactor here.
+func (r *ConfigSyncReconciler) redactMsg(msg string) string {
+	if r.Redactor == nil {
+		return msg
+	}
+	return r.Redactor.String(msg)
+}
+
 // loadCredential resolves the git credential from spec.source.authSecretRef.
 // It enforces the required credential label (R-AUTH.6), registers secret
 // material with the redactor (R8.3), and returns nil for anonymous access.
