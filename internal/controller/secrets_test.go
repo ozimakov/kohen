@@ -24,6 +24,7 @@ import (
 	fakesecret "github.com/ozimakov/kohen/internal/secret/fake"
 	"github.com/ozimakov/kohen/internal/testenv"
 	"github.com/ozimakov/kohen/internal/wire"
+	"github.com/ozimakov/kohen/test/leakcheck"
 )
 
 // newReconcilerWithResolver builds a reconciler wired with a fake native
@@ -313,6 +314,7 @@ func TestSecretTokenNotLeaked(t *testing.T) {
 	fake := fakesecret.New().SetReady("tok-secret", token)
 	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
 	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "abcabcabcabc0000"}, fake)
+	scan := leakcheck.New(token)
 	reconcileN(t, r, key, 2)
 
 	cs = getCS(t, env, key)
@@ -321,5 +323,87 @@ func TestSecretTokenNotLeaked(t *testing.T) {
 	}
 	if s := podTemplateStamp(t, env, "tokapp"); strings.Contains(s, token) {
 		t.Errorf("version token leaked into workload stamp: %q", s)
+	}
+	// Broaden: no condition message or per-ref status may carry the token.
+	scan.AssertObjectClean(t, "configsync status", cs)
+}
+
+// TestSecretEstablishmentRequiresWiring: a reference that resolves but whose
+// workload is never wired (workload missing) must NOT become established, so a
+// later outage fails closed (AwaitingFirstResolution) rather than emitting the
+// security-visible MaxDegradedExceeded signal (R8.9/R8.11).
+func TestSecretEstablishmentRequiresWiring(t *testing.T) {
+	env := testenv.Start(t)
+	// Deliberately no workload: wiring will fail with WorkloadNotFound.
+	refs := []kohenv1alpha1.SecretReference{envRef("db", "est-secret", "DB", "password")}
+	cs := makeConfigSyncWithRefs(t, env, "estsync", "ghostwl", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	fake := fakesecret.New().SetReady("est-secret", "rv-1")
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "eeee1111eeee2222"}, fake)
+	reconcileN(t, r, key, 2)
+
+	cs = getCS(t, env, key)
+	if len(cs.Status.SecretRefs) != 1 || cs.Status.SecretRefs[0].Established {
+		t.Fatalf("ref must not be established when wiring failed: %+v", cs.Status.SecretRefs)
+	}
+
+	// Drop the secret. Because it never wired, this is still a first resolution.
+	fake.Set("est-secret", secret.Resolution{Ready: false, Reason: kohenv1alpha1.ReasonSecretNotFound, Message: "gone"})
+	rec := r.Recorder.(*record.FakeRecorder)
+	reconcileN(t, r, key, 1)
+
+	cs = getCS(t, env, key)
+	if secretsReadyReason(cs) != kohenv1alpha1.ReasonAwaitingFirstResolution {
+		t.Errorf("SecretsReady reason = %q, want AwaitingFirstResolution", secretsReadyReason(cs))
+	}
+	for drain := true; drain; {
+		select {
+		case ev := <-rec.Events:
+			if strings.Contains(ev, kohenv1alpha1.ReasonMaxDegradedExceeded) {
+				t.Errorf("spurious MaxDegradedExceeded event for a never-wired secret: %q", ev)
+			}
+		default:
+			drain = false
+		}
+	}
+}
+
+// TestSecretNewRefFailsClosedKeepsLastGood: adding a new (unready) reference to
+// an already-healthy ConfigSync fails the aggregate closed and preserves the
+// last-good wiring/stamp (R8.9).
+func TestSecretNewRefFailsClosedKeepsLastGood(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "growapp")
+	refs := []kohenv1alpha1.SecretReference{envRef("a", "a-secret", "AAA", "k")}
+	cs := makeConfigSyncWithRefs(t, env, "growsync", "growapp", kohenv1alpha1.RolloutAuto, refs)
+	key := client.ObjectKeyFromObject(cs)
+
+	fake := fakesecret.New().SetReady("a-secret", "rv-a")
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconcilerWithResolver(env, &fakeFetcher{dir: dir, commit: "1234abcd1234abcd"}, fake)
+	reconcileN(t, r, key, 2)
+	goodStamp := podTemplateStamp(t, env, "growapp")
+	if goodStamp == "" {
+		t.Fatal("expected a good stamp after first resolution")
+	}
+
+	// Add a second, not-yet-resolvable reference.
+	cs = getCS(t, env, key)
+	cs.Spec.SecretRefs = append(cs.Spec.SecretRefs, envRef("b", "b-secret", "BBB", "k"))
+	if err := env.Client.Update(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	reconcileN(t, r, key, 1)
+
+	cs = getCS(t, env, key)
+	if secretsReadyReason(cs) != kohenv1alpha1.ReasonAwaitingFirstResolution {
+		t.Errorf("adding an unready ref should fail closed, reason = %q", secretsReadyReason(cs))
+	}
+	// Last-good preserved: stamp unchanged.
+	if got := podTemplateStamp(t, env, "growapp"); got != goodStamp {
+		t.Errorf("last-good stamp changed while a new ref was unresolved: %q -> %q", goodStamp, got)
 	}
 }

@@ -58,7 +58,7 @@ func (r *ConfigSyncReconciler) resolveSecrets(ctx context.Context, cs *kohenv1al
 		ref := &refs[i]
 		res := r.resolveOne(ctx, cs.Namespace, ref)
 		if !res.Ready {
-			metrics.SecretResolveErrors.WithLabelValues(res.Reason).Inc()
+			metrics.SecretResolveErrors.WithLabelValues(knownResolveReason(res.Reason)).Inc()
 		}
 		evals = append(evals, secret.EvaluatedRef{
 			Name:            ref.Name,
@@ -77,16 +77,9 @@ func (r *ConfigSyncReconciler) resolveSecrets(ctx context.Context, cs *kohenv1al
 		newStatus = append(newStatus, st)
 	}
 
-	decision := secret.Evaluate(evals, degradedSince, maxDegraded, now)
-
-	// When every reference resolves we are about to apply this version: mark all
-	// references established so a later transient outage fails safe (R8.9).
-	if decision.AllReady {
-		for i := range newStatus {
-			newStatus[i].Established = true
-		}
-	}
 	cs.Status.SecretRefs = newStatus
+
+	decision := secret.Evaluate(evals, degradedSince, maxDegraded, now)
 
 	status := metav1.ConditionTrue
 	if !decision.SecretsReady {
@@ -94,6 +87,33 @@ func (r *ConfigSyncReconciler) resolveSecrets(ctx context.Context, cs *kohenv1al
 	}
 	setCondition(cs, kohenv1alpha1.ConditionSecretsReady, status, decision.Reason, r.redactMsg(decision.Message))
 	return decision
+}
+
+// markSecretsEstablished sets the sticky Established marker on every current
+// secret reference. It is called only after the workload has actually been
+// wired for the resolved version, so establishment tracks "wired" (not merely
+// "resolved") per R8.9 — preventing a reference that resolved but never wired
+// (e.g. the workload was missing) from later failing safe and emitting a
+// spurious MaxDegradedExceeded security signal.
+func markSecretsEstablished(cs *kohenv1alpha1.ConfigSync) {
+	for i := range cs.Status.SecretRefs {
+		cs.Status.SecretRefs[i].Established = true
+	}
+}
+
+// knownResolveReason bounds the SecretResolveErrors metric label to the §11.4
+// reason set (plus a catch-all) so a backend returning an arbitrary reason
+// cannot blow up metric cardinality (R8.3).
+func knownResolveReason(reason string) string {
+	switch reason {
+	case kohenv1alpha1.ReasonSecretNotFound,
+		kohenv1alpha1.ReasonKeyMissing,
+		kohenv1alpha1.ReasonBackendNotReady,
+		kohenv1alpha1.ReasonInvalidSurface:
+		return reason
+	default:
+		return "Other"
+	}
 }
 
 // resolveOne validates the surface and dispatches to the backend resolver.

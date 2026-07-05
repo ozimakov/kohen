@@ -202,14 +202,17 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	// backend outage with a prior good version (R8.9), bounded by
 	// maxDegradedDuration (R8.11).
 	now := time.Now()
+	priorSecretsReason := conditionReason(cs, kohenv1alpha1.ConditionSecretsReady)
 	decision := r.resolveSecrets(ctx, cs, now)
 	if !decision.AllReady {
-		if decision.MaxDegradedExceeded {
+		if decision.MaxDegradedExceeded && priorSecretsReason != kohenv1alpha1.ReasonMaxDegradedExceeded {
+			// Fire the security-visible signal once, on entry to the state
+			// (R8.11), not on every requeue while it persists.
 			metrics.MaxDegradedExceededTotal.Inc()
 			r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonMaxDegradedExceeded, decision.Message)
 		}
 		// Keep last-good: do not wire secret surfaces or stamp the new version.
-		r.setReady(cs, metav1.ConditionFalse, decision.ReadyReason, decision.Message)
+		r.setReady(cs, metav1.ConditionFalse, decision.ReadyReason, r.redactMsg(decision.Message))
 		return ctrl.Result{RequeueAfter: progressingRequeue}, nil
 	}
 
@@ -220,6 +223,13 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	cs.Status.ConfigVersion = version
 	metrics.SetConfigVersion(cs.Namespace, cs.Name, version)
 	rolloutComplete := r.wireAndStamp(ctx, cs, cmName, version)
+
+	// Only once the workload is actually wired for this version do the resolved
+	// references count as established (R8.9): a resolution that never reached
+	// the workload must still fail closed on a later outage.
+	if workloadWired(cs) {
+		markSecretsEstablished(cs)
+	}
 
 	// Overall readiness.
 	r.computeReady(cs)
@@ -455,6 +465,14 @@ func conditionTrue(cs *kohenv1alpha1.ConfigSync, condType string) bool {
 
 func workloadWired(cs *kohenv1alpha1.ConfigSync) bool {
 	return conditionTrue(cs, kohenv1alpha1.ConditionWorkloadWired)
+}
+
+// conditionReason returns the reason of a condition, or "" if absent.
+func conditionReason(cs *kohenv1alpha1.ConfigSync, condType string) string {
+	if c := findCondition(cs, condType); c != nil {
+		return c.Reason
+	}
+	return ""
 }
 
 // SetupWithManager wires defaults and registers the reconciler.
