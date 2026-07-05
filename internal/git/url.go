@@ -138,16 +138,24 @@ func (c *Client) validate(ctx context.Context, p parsedURL) error {
 // in-cluster git servers work. Hostnames are resolved only when a Resolver is
 // configured; IP-literal hosts are always checked.
 func (c *Client) guardHost(ctx context.Context, host string) error {
+	return guardResolvedHost(ctx, c.resolver, host)
+}
+
+// guardResolvedHost applies the SSRF IP guard to host using resolver. It is used
+// both for the initial source URL and, via the redirect policy, for every
+// redirect hop (R-AUTH.7 / TM5). IP-literal hosts are always checked; hostnames
+// are resolved only when a resolver is provided.
+func guardResolvedHost(ctx context.Context, resolver Resolver, host string) error {
 	if ip := net.ParseIP(host); ip != nil {
 		if blocked, why := blockedIP(ip); blocked {
 			return newError(ReasonSourceNotAllowed, fmt.Sprintf("source host %q is a %s address", host, why))
 		}
 		return nil
 	}
-	if c.resolver == nil {
+	if resolver == nil {
 		return nil
 	}
-	addrs, err := c.resolver.LookupIPAddr(ctx, host)
+	addrs, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return wrapError(ReasonFetchFailed, err, "resolving source host %q", host)
 	}

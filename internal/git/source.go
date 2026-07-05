@@ -85,8 +85,10 @@ type Client struct {
 	resolver            Resolver
 }
 
-// NewClient returns a Client configured with opts.
+// NewClient returns a Client configured with opts. It also installs the
+// process-wide safe HTTPS transport so redirects are guarded (R-AUTH.7).
 func NewClient(opts Options) *Client {
+	installSafeHTTPTransport(opts.Resolver)
 	return &Client{
 		allowList:           opts.AllowList,
 		allowLocalTransport: opts.AllowLocalTransport,
