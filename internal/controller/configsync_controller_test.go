@@ -26,6 +26,7 @@ import (
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/testenv"
 	"github.com/ozimakov/kohen/internal/wire"
+	"github.com/ozimakov/kohen/test/leakcheck"
 )
 
 // fakeFetcher returns a prepared directory as if fetched from git.
@@ -525,6 +526,65 @@ func TestPipelineRedactsSecretsInStatusAndEvents(t *testing.T) {
 			if strings.Contains(ev, token) {
 				t.Errorf("token leaked into event: %q", ev)
 			}
+		default:
+			drain = false
+		}
+	}
+}
+
+func TestPipelineNoSecretLeakAcrossSinks(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "leakapp")
+
+	const token = "distinctive-leak-token-9f8e7d6c"
+	scan := leakcheck.New(token)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "leakcreds", Namespace: "default",
+			Labels: map[string]string{kohenv1alpha1.LabelGitCredential: "true"},
+		},
+		Data: map[string][]byte{"token": []byte(token)},
+	}
+	if err := env.Client.Create(ctx, sec); err != nil {
+		t.Fatal(err)
+	}
+	cs := makeConfigSync(t, env, "leaksync", "leakapp", kohenv1alpha1.RolloutAuto)
+	cs = getCS(t, env, client.ObjectKeyFromObject(cs))
+	cs.Spec.Source.AuthSecretRef = &kohenv1alpha1.LocalObjectReference{Name: "leakcreds"}
+	if err := env.Client.Update(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(cs)
+
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "cafebabecafebabe"})
+	rec := r.Recorder.(*record.FakeRecorder)
+	reconcileN(t, r, key, 2)
+
+	// Happy path: scan every persisted sink for the fixture token.
+	cs = getCS(t, env, key)
+	scan.AssertObjectClean(t, "configsync status", cs)
+	cm := &corev1.ConfigMap{}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "leakapp-config", Namespace: "default"}, cm); err != nil {
+		t.Fatal(err)
+	}
+	scan.AssertObjectClean(t, "configmap", cm)
+	d := &appsv1.Deployment{}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "leakapp", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	scan.AssertObjectClean(t, "workload", d)
+
+	// Failure path: an error echoing the token must not leak into status/events.
+	r.Fetcher = &fakeFetcher{err: &git.Error{Reason: git.ReasonFetchFailed, Msg: "clone https://x:" + token + "@h failed"}}
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	cs = getCS(t, env, key)
+	scan.AssertObjectClean(t, "configsync status after failure", cs)
+	for drain := true; drain; {
+		select {
+		case ev := <-rec.Events:
+			scan.AssertClean(t, "event", ev)
 		default:
 			drain = false
 		}
