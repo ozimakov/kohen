@@ -9,6 +9,10 @@ const (
 	ConditionFetched = "Fetched"
 	// ConditionRendered reports that config rendered within limits.
 	ConditionRendered = "Rendered"
+	// ConditionManifestsApplied reports the apply-if-present engine result:
+	// recognized secret manifests (ExternalSecret) committed to git are applied
+	// (owned + pruned) subject to the guard rails (SPEC §8.2, R8.8, R-AUTH.4).
+	ConditionManifestsApplied = "ManifestsApplied"
 	// ConditionSecretsReady reports that all references resolved (R8.9).
 	ConditionSecretsReady = "SecretsReady"
 	// ConditionWorkloadWired reports SSA merge of owned fields.
@@ -48,6 +52,14 @@ const (
 	ReasonDegradedServingLastGood = "DegradedServingLastGood"
 	ReasonMaxDegradedExceeded     = "MaxDegradedExceeded"
 	ReasonInvalidSurface          = "InvalidSurface"
+
+	// ManifestsApplied reasons (Phase 2, S2.4). Guard-rail rejections fail
+	// closed (R-AUTH.4/R-AUTH.5); ManifestApplyFailed is a transient apply error.
+	ReasonManifestKindNotAllowed     = "ManifestKindNotAllowed"
+	ReasonManifestNamespaceViolation = "ManifestNamespaceViolation"
+	ReasonStoreNotAllowed            = "StoreNotAllowed"
+	ReasonManifestInvalid            = "ManifestInvalid"
+	ReasonManifestApplyFailed        = "ManifestApplyFailed"
 
 	// WorkloadWired reasons.
 	ReasonWorkloadNotFound    = "WorkloadNotFound"

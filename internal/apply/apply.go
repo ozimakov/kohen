@@ -21,7 +21,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -165,6 +167,25 @@ func (a *Applier) Prune(ctx context.Context, owner client.Object, list client.Ob
 		}
 	}
 	return nil
+}
+
+// PruneKind prunes owned objects of the given list GVK (e.g. an
+// ExternalSecretList) whose names are not in keep, tolerating a cluster that
+// does not serve that kind/version (returns nil so pruning across multiple
+// candidate API versions is safe). Used for CRD-backed apply-if-present
+// manifests where the served version is not known ahead of time.
+func (a *Applier) PruneKind(ctx context.Context, owner client.Object, listGVK schema.GroupVersionKind, keep ...string) error {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(listGVK)
+	err := a.Prune(ctx, owner, list, keep...)
+	if err == nil {
+		return nil
+	}
+	// A server that does not serve this kind/version has nothing to prune.
+	if meta.IsNoMatchError(errors.Unwrap(err)) || apierrors.IsNotFound(errors.Unwrap(err)) {
+		return nil
+	}
+	return err
 }
 
 func (a *Applier) ensureGVK(obj client.Object) error {

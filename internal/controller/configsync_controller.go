@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,11 +28,13 @@ import (
 	"github.com/ozimakov/kohen/internal/apply"
 	"github.com/ozimakov/kohen/internal/config"
 	"github.com/ozimakov/kohen/internal/git"
+	"github.com/ozimakov/kohen/internal/manifest"
 	"github.com/ozimakov/kohen/internal/metrics"
 	"github.com/ozimakov/kohen/internal/redact"
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/rollout"
 	"github.com/ozimakov/kohen/internal/secret"
+	"github.com/ozimakov/kohen/internal/secret/eso"
 	"github.com/ozimakov/kohen/internal/secret/native"
 	"github.com/ozimakov/kohen/internal/wire"
 )
@@ -68,6 +71,7 @@ type ConfigSyncReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;patch
 
 // Reconcile runs the ConfigSync pipeline.
@@ -196,6 +200,18 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}, cmName); err != nil {
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
 		return ctrl.Result{}, err
+	}
+
+	// Apply-if-present secret manifests (ExternalSecrets) from git, owned +
+	// pruned and subject to the guard rails (§8.2, R8.8, R-AUTH.4). This
+	// precedes resolution so the ESO backend can observe applied objects; a
+	// guard-rail violation fails closed.
+	if out := r.applyManifests(ctx, cs, res.Dir); !out.ok {
+		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "secret manifest apply failed, serving last-good")
+		if out.terminal {
+			return steady, nil // terminal until the user fixes the manifest/guard violation
+		}
+		return ctrl.Result{}, out.err
 	}
 
 	// Resolve secret references (§8). Secrets gate advancing to the new config
@@ -390,6 +406,15 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Prune this sync's applied secret manifests (ExternalSecrets), across the
+	// candidate API versions (R8.8, R-WIRE.6). ESO deletes the target Secret it
+	// created when the ExternalSecret is removed.
+	for _, v := range externalSecretPruneVersions {
+		gvk := schema.GroupVersionKind{Group: manifest.ExternalSecretsGroup, Version: v, Kind: manifest.ExternalSecretKind + "List"}
+		if err := r.Applier.PruneKind(ctx, cs, gvk); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	// Drop per-object metric series so deleted syncs don't leak time series.
 	metrics.ClearConfigSync(cs.Namespace, cs.Name)
 	controllerutil.RemoveFinalizer(cs, FinalizerName)
@@ -433,6 +458,7 @@ func (r *ConfigSyncReconciler) computeReady(cs *kohenv1alpha1.ConfigSync) {
 	for _, t := range []string{
 		kohenv1alpha1.ConditionFetched,
 		kohenv1alpha1.ConditionRendered,
+		kohenv1alpha1.ConditionManifestsApplied,
 		kohenv1alpha1.ConditionSecretsReady,
 		kohenv1alpha1.ConditionWorkloadWired,
 	} {
@@ -500,13 +526,15 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Renderer = render.New(render.Options{})
 	}
 	if r.Resolvers == nil {
-		// Register the native backend (S2.3); ESO is added in S2.4. An
-		// unregistered backend resolves to BackendNotReady, failing closed
-		// rather than silently wiring nothing. The native resolver reads via
-		// the uncached API reader so arbitrary referenced Secrets can be read
-		// on demand without caching all Secret material (TM8, T6).
+		// Register both v1 backends: native Secret (S2.3) and ESO ExternalSecret
+		// (S2.4). An unregistered backend resolves to BackendNotReady, failing
+		// closed rather than silently wiring nothing. Resolvers read via the
+		// uncached API reader so arbitrary referenced objects can be read on
+		// demand without caching all Secret material (TM8, T6).
+		reader := mgr.GetAPIReader()
 		r.Resolvers = map[secret.Backend]secret.Resolver{
-			secret.BackendNativeSecret: native.New(mgr.GetAPIReader()),
+			secret.BackendNativeSecret:   native.New(reader),
+			secret.BackendExternalSecret: eso.New(reader),
 		}
 	}
 	if r.Fetcher == nil {

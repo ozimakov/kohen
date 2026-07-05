@@ -28,15 +28,23 @@ type Env struct {
 // Start boots an envtest control plane with the Kohen CRDs installed and returns
 // a client wired to the combined scheme. It registers cleanup on t and skips the
 // test if KUBEBUILDER_ASSETS is unset.
-func Start(t *testing.T) *Env {
+//
+// extraCRDDirs are additional CRD directories (repo-relative) to install
+// alongside Kohen's own — e.g. "test/crds" for the ExternalSecret CRD used by
+// ESO integration tests.
+func Start(t *testing.T, extraCRDDirs ...string) *Env {
 	t.Helper()
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set; skipping envtest (Tier 2) test")
 	}
 
-	crdPath := filepath.Join(repoRoot(t), "config", "crd", "bases")
+	root := repoRoot(t)
+	crdPaths := []string{filepath.Join(root, "config", "crd", "bases")}
+	for _, d := range extraCRDDirs {
+		crdPaths = append(crdPaths, filepath.Join(root, filepath.FromSlash(d)))
+	}
 	e := &envtest.Environment{
-		CRDDirectoryPaths:     []string{crdPath},
+		CRDDirectoryPaths:     crdPaths,
 		ErrorIfCRDPathMissing: true,
 	}
 
