@@ -83,3 +83,86 @@ jobs:
             done
             kubectl describe deploy -n "${ns}" || true
           done
+
+  secrets:
+    name: U2 secret integration (ESO + native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: kohen
+          version: v0.24.0
+          node_image: kindest/node:v1.31.0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Build images
+        run: |
+          docker build -t kohen:e2e -f Dockerfile .
+          docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image kohen:e2e --name kohen
+          kind load docker-image kohen-e2e-gitserver:e2e --name kohen
+
+      # Real External Secrets Operator with its built-in fake provider (no
+      # external secret store needed). Serves external-secrets.io/v1.
+      - name: Install External Secrets Operator
+        run: |
+          helm repo add external-secrets https://charts.external-secrets.io
+          helm repo update
+          helm install external-secrets external-secrets/external-secrets \
+            --namespace external-secrets --create-namespace \
+            --version 2.7.0 \
+            --set installCRDs=true \
+            --wait --timeout 5m
+
+      # U2 install: allow-list the fake store (so the store guard rail is live),
+      # a short maxDegradedDuration (so MaxDegradedExceeded is reachable in-test),
+      # and a source allow-list that permits every in-cluster gitserver while
+      # rejecting other hosts (for the disallowed-URL abuse case).
+      - name: Install Kohen via Helm (U2 config)
+        run: |
+          helm install kohen deploy/helm/kohen \
+            --namespace kohen-system --create-namespace \
+            --set image.repository=kohen \
+            --set image.tag=e2e \
+            --set image.pullPolicy=Never \
+            --set operatorConfig.allowInsecureGitTLS=true \
+            --set operatorConfig.maxDegradedDuration=45s \
+            --set 'operatorConfig.secretStoreAllowList={fake-store}' \
+            --set 'operatorConfig.sourceAllowList={https://gitserver.}' \
+            --wait --timeout 4m
+
+      - name: Run U2 secret e2e suite
+        env:
+          GITSERVER_IMAGE: kohen-e2e-gitserver:e2e
+        run: make e2e-secrets
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== operator logs ==="
+          kubectl logs -n kohen-system deploy/kohen --tail=400 || true
+          echo "=== external-secrets logs ==="
+          kubectl logs -n external-secrets deploy/external-secrets --tail=200 || true
+          echo "=== configsyncs (all namespaces) ==="
+          kubectl get configsync -A -o yaml || true
+          echo "=== externalsecrets (all namespaces) ==="
+          kubectl get externalsecrets.external-secrets.io -A -o yaml || true
+          for ns in $(kubectl get ns -o name | grep -oE 'kohen-e2e[^ ]*' || true); do
+            echo "=== namespace ${ns} ==="
+            kubectl get all,cm,secretstores.external-secrets.io,externalsecrets.external-secrets.io -n "${ns}" -o wide || true
+            kubectl describe deploy -n "${ns}" || true
+          done
