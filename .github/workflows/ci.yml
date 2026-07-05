@@ -1,0 +1,66 @@
+# Continuous integration for Kohen (PLAN S0.1).
+#
+# Tiers currently wired: lint + Tier 1 unit and Tier 2 (local git fixture)
+# tests. Tier 2 envtest and Tier 3 kind (U1) jobs slot in as the operator
+# packages land (S1.3+); see the notes at the bottom of this file.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Tracks the go directive in go.mod (>= 1.23, SPEC T1). Using a
+          # release-built golangci-lint via the action avoids the toolchain
+          # mismatch seen when building it against an older base Go.
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify go.mod/go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test (race + coverage)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
+
+# Planned additional jobs (added with the steps that need them):
+#   * envtest (Tier 2): install sigs.k8s.io/controller-runtime/tools/setup-envtest,
+#     export KUBEBUILDER_ASSETS, run controller/API tests — arrives with S1.3+.
+#   * e2e (Tier 3): kind cluster + Helm install + real workloads — U1 milestone.
+#   * image: multi-arch (amd64/arm64) distroless build/publish — S1.4 / S3.3 (T5).
