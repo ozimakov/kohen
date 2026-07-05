@@ -138,16 +138,28 @@ func (c *Client) validate(ctx context.Context, p parsedURL) error {
 // in-cluster git servers work. Hostnames are resolved only when a Resolver is
 // configured; IP-literal hosts are always checked.
 func (c *Client) guardHost(ctx context.Context, host string) error {
-	return guardResolvedHost(ctx, c.resolver, host)
+	return guardResolvedHostAllowing(ctx, c.resolver, host, c.allowLoopback)
 }
 
 // guardResolvedHost applies the SSRF IP guard to host using resolver. It is used
-// both for the initial source URL and, via the redirect policy, for every
-// redirect hop (R-AUTH.7 / TM5). IP-literal hosts are always checked; hostnames
-// are resolved only when a resolver is provided.
+// by the redirect policy for every redirect hop (R-AUTH.7 / TM5). IP-literal
+// hosts are always checked; hostnames are resolved only when a resolver is
+// provided.
 func guardResolvedHost(ctx context.Context, resolver Resolver, host string) error {
+	return guardResolvedHostAllowing(ctx, resolver, host, false)
+}
+
+// guardResolvedHostAllowing is guardResolvedHost with an optional loopback
+// exemption for test fixtures that serve git on 127.0.0.1.
+func guardResolvedHostAllowing(ctx context.Context, resolver Resolver, host string, allowLoopback bool) error {
+	check := func(ip net.IP) (bool, string) {
+		if allowLoopback && ip.IsLoopback() {
+			return false, ""
+		}
+		return blockedIP(ip)
+	}
 	if ip := net.ParseIP(host); ip != nil {
-		if blocked, why := blockedIP(ip); blocked {
+		if blocked, why := check(ip); blocked {
 			return newError(ReasonSourceNotAllowed, fmt.Sprintf("source host %q is a %s address", host, why))
 		}
 		return nil
@@ -160,7 +172,7 @@ func guardResolvedHost(ctx context.Context, resolver Resolver, host string) erro
 		return wrapError(ReasonFetchFailed, err, "resolving source host %q", host)
 	}
 	for _, a := range addrs {
-		if blocked, why := blockedIP(a.IP); blocked {
+		if blocked, why := check(a.IP); blocked {
 			return newError(ReasonSourceNotAllowed,
 				fmt.Sprintf("source host %q resolves to a %s address", host, why))
 		}

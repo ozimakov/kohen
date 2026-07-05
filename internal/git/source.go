@@ -74,6 +74,10 @@ type Options struct {
 	// AllowLocalTransport permits filesystem/file:// sources. Off by default;
 	// intended for test fixtures and never for production.
 	AllowLocalTransport bool
+	// AllowLoopback permits source hosts that resolve to loopback addresses.
+	// Off by default (loopback is an SSRF vector); intended only for tests that
+	// run a git server on 127.0.0.1.
+	AllowLoopback bool
 	// Resolver enables DNS-based SSRF guarding of hostnames. When nil, only
 	// IP-literal hosts are guarded.
 	Resolver Resolver
@@ -89,6 +93,7 @@ type Options struct {
 type Client struct {
 	allowList           []string
 	allowLocalTransport bool
+	allowLoopback       bool
 	resolver            Resolver
 	cache               *fetchCache
 }
@@ -100,6 +105,7 @@ func NewClient(opts Options) *Client {
 	c := &Client{
 		allowList:           opts.AllowList,
 		allowLocalTransport: opts.AllowLocalTransport,
+		allowLoopback:       opts.AllowLoopback,
 		resolver:            opts.Resolver,
 	}
 	if opts.CacheTTL > 0 {

@@ -38,6 +38,9 @@ func installSafeHTTPTransport(resolver Resolver) {
 		}
 		hc := &http.Client{
 			Timeout: 5 * time.Minute,
+			// go-git requires an *http.Transport so it can apply per-fetch TLS
+			// options (e.g. InsecureSkipTLS); a nil transport is rejected.
+			Transport: http.DefaultTransport.(*http.Transport).Clone(),
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= maxRedirects {
 					return fmt.Errorf("stopped after %d redirects", maxRedirects)
