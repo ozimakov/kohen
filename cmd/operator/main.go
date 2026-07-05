@@ -82,6 +82,8 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("configsync-controller"),
+		Redactor: redactor,
+		Config:   opCfg,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "setting up ConfigSync controller")
 		os.Exit(1)
