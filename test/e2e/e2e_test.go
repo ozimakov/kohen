@@ -147,6 +147,29 @@ func deployGitServer(t *testing.T, c client.Client, ns, svc string, env []corev1
 	waitDeployReady(t, c, ns, svc, 120*time.Second)
 }
 
+// waitStableGeneration returns the Deployment's generation once it has stopped
+// changing for quiet — used to settle initial wiring before asserting no churn.
+func waitStableGeneration(t *testing.T, c client.Client, ns, name string, quiet, timeout time.Duration) int64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last int64 = -1
+	stableSince := time.Now()
+	for time.Now().Before(deadline) {
+		d := &appsv1.Deployment{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, d); err == nil {
+			if d.Generation != last {
+				last = d.Generation
+				stableSince = time.Now()
+			} else if time.Since(stableSince) >= quiet {
+				return last
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("generation of %s never stabilized (last=%d)", name, last)
+	return -1
+}
+
 func waitDeployReady(t *testing.T, c client.Client, ns, name string, timeout time.Duration) {
 	t.Helper()
 	eventually(t, timeout, name+" ready", func() error {
@@ -392,6 +415,18 @@ func TestU1ConfigSyncJourney(t *testing.T) {
 		v2 = d.Spec.Template.Annotations[configSHAAnnotation]
 		if v2 == "" || v2 == v1 {
 			return fmt.Errorf("version not advanced: was %q now %q", v1, v2)
+		}
+		return nil
+	})
+
+	// UC7: the workload version reported in status matches the pod-template stamp.
+	eventually(t, 60*time.Second, "status.workloadVersion matches stamp", func() error {
+		got := &kohenv1alpha1.ConfigSync{}
+		if err := c.Get(ctx, key, got); err != nil {
+			return err
+		}
+		if got.Status.WorkloadVersion != v2 {
+			return fmt.Errorf("workloadVersion = %q, want stamp %q", got.Status.WorkloadVersion, v2)
 		}
 		return nil
 	})

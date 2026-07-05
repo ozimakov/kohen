@@ -69,7 +69,6 @@ func TestU1RolloutNone(t *testing.T) {
 
 	// Volume wired, but pod template NOT stamped; version lives on the object.
 	var objV1 string
-	var gen int64
 	eventually(t, 60*time.Second, "wired without pod-template stamp", func() error {
 		d := &appsv1.Deployment{}
 		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "app"}, d); err != nil {
@@ -85,9 +84,11 @@ func TestU1RolloutNone(t *testing.T) {
 		if objV1 == "" {
 			return fmt.Errorf("object not stamped with version")
 		}
-		gen = d.Generation
 		return nil
 	})
+	// Settle initial wiring before capturing the baseline generation, so the
+	// churn check below reflects only the config change (mirrors the Tier-2 test).
+	gen := waitStableGeneration(t, c, ns, "app", 8*time.Second, 60*time.Second)
 
 	// Commit a change ⇒ ConfigMap updates, object version advances, NO rollout.
 	commitFile(t, ns, "gitserver", 18444, "svc/app.yaml", "greeting: hello-v2\n")
@@ -345,11 +346,20 @@ func TestU1PrivateRepoAuth(t *testing.T) {
 		{Name: "AUTH_PASS", Value: "s3cr3t"},
 	})
 	deployDeployment(t, c, ns, "good-app")
+	deployDeployment(t, c, ns, "token-app")
 	deployDeployment(t, c, ns, "bad-app")
 
+	// SSH-key auth (ssh-privatekey/known_hosts) is validated at the unit tier
+	// (internal/git/auth_test.go: TestAuthMethodSSH); the e2e here exercises the
+	// two HTTPS credential forms end-to-end: username/password and token.
 	createCredentialSecret(t, c, ns, "good-creds", map[string][]byte{
 		"username":                 []byte("git"),
 		"password":                 []byte("s3cr3t"),
+		"insecure-skip-tls-verify": []byte("true"),
+	})
+	createCredentialSecret(t, c, ns, "token-creds", map[string][]byte{
+		"username":                 []byte("git"),
+		"token":                    []byte("s3cr3t"),
 		"insecure-skip-tls-verify": []byte("true"),
 	})
 	createCredentialSecret(t, c, ns, "bad-creds", map[string][]byte{
@@ -384,21 +394,52 @@ func TestU1PrivateRepoAuth(t *testing.T) {
 		configSyncReady(t, c, client.ObjectKeyFromObject(cs), 120*time.Second)
 	})
 
+	t.Run("token_credential_sync", func(t *testing.T) {
+		cs := mkSync("token-sync", "token-app", "token-creds")
+		if err := c.Create(ctx, cs); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Delete(ctx, cs) })
+		configSyncReady(t, c, client.ObjectKeyFromObject(cs), 120*time.Second)
+	})
+
 	t.Run("bad_credentials_degraded", func(t *testing.T) {
 		cs := mkSync("bad-sync", "bad-app", "bad-creds")
 		if err := c.Create(ctx, cs); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		t.Cleanup(func() { _ = c.Delete(ctx, cs) })
-		waitConditionReason(t, c, client.ObjectKeyFromObject(cs), kohenv1alpha1.ConditionFetched,
+		key := client.ObjectKeyFromObject(cs)
+		waitConditionReason(t, c, key, kohenv1alpha1.ConditionFetched,
 			metav1.ConditionFalse, kohenv1alpha1.ReasonAuthFailed, 90*time.Second)
-		// The credential value must never appear in status/events.
-		assertNoSecretLeak(t, c, client.ObjectKeyFromObject(cs), "wrong")
+		// An actionable, redacted AuthFailed event must be emitted (R8.3/TM9);
+		// the credential value must never appear in status or events.
+		assertAuthFailedEvent(t, c, ns, cs.Name)
+		assertNoSecretLeak(t, c, ns, key, cs.Name, "wrong")
 	})
 }
 
-// assertNoSecretLeak fails if secret appears anywhere in the ConfigSync status.
-func assertNoSecretLeak(t *testing.T, c client.Client, key client.ObjectKey, secret string) {
+// assertAuthFailedEvent waits for a Warning AuthFailed event on the ConfigSync.
+func assertAuthFailedEvent(t *testing.T, c client.Client, ns, name string) {
+	t.Helper()
+	eventually(t, 90*time.Second, "AuthFailed event", func() error {
+		var events corev1.EventList
+		if err := c.List(context.Background(), &events, client.InNamespace(ns)); err != nil {
+			return err
+		}
+		for _, e := range events.Items {
+			if e.InvolvedObject.Kind == "ConfigSync" && e.InvolvedObject.Name == name &&
+				e.Reason == kohenv1alpha1.ReasonAuthFailed && e.Type == corev1.EventTypeWarning {
+				return nil
+			}
+		}
+		return fmt.Errorf("no Warning/AuthFailed event for %s", name)
+	})
+}
+
+// assertNoSecretLeak fails if secret appears in the ConfigSync status conditions
+// or in any event message for the object.
+func assertNoSecretLeak(t *testing.T, c client.Client, ns string, key client.ObjectKey, name, secret string) {
 	t.Helper()
 	got := &kohenv1alpha1.ConfigSync{}
 	if err := c.Get(context.Background(), key, got); err != nil {
@@ -407,6 +448,16 @@ func assertNoSecretLeak(t *testing.T, c client.Client, key client.ObjectKey, sec
 	for _, cond := range got.Status.Conditions {
 		if strings.Contains(cond.Message, secret) {
 			t.Fatalf("secret leaked into condition %s: %q", cond.Type, cond.Message)
+		}
+	}
+	var events corev1.EventList
+	if err := c.List(context.Background(), &events, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, e := range events.Items {
+		if e.InvolvedObject.Kind == "ConfigSync" && e.InvolvedObject.Name == name &&
+			strings.Contains(e.Message, secret) {
+			t.Fatalf("secret leaked into event %s: %q", e.Reason, e.Message)
 		}
 	}
 }
@@ -452,27 +503,37 @@ func TestU1GitOpsCoexistence(t *testing.T) {
 
 	// Kohen's fields survive the GitOps apply.
 	assertKohenWired(t, c, ns, "app")
-	// And the GitOps-owned field survives Kohen's next reconcile.
-	forceSync(t, c, key)
-	consistently(t, 20*time.Second, "no flapping between Kohen and GitOps", func() error {
+
+	// Simulate an ongoing GitOps reconcile loop with self-heal (repeated forced
+	// SSA of the app-owned fields) interleaved with Kohen reconciles, and assert
+	// neither manager ever strips the other's fields — i.e. no flapping (A10).
+	deadline := time.Now().Add(24 * time.Second)
+	for i := 0; time.Now().Before(deadline); i++ {
+		gitopsApply(t, c, ns, "app", 3) // GitOps re-applies its desired state
+		if i%2 == 0 {
+			forceSync(t, c, key) // Kohen re-reconciles
+		}
 		d := &appsv1.Deployment{}
 		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "app"}, d); err != nil {
-			return err
+			t.Fatalf("get deploy: %v", err)
 		}
 		if d.Spec.Replicas == nil || *d.Spec.Replicas != 3 {
-			return fmt.Errorf("gitops replicas retracted: %v", d.Spec.Replicas)
+			t.Fatalf("gitops replicas retracted: %v", d.Spec.Replicas)
 		}
 		if d.Spec.Template.Labels["managed-by-gitops"] != "true" {
-			return fmt.Errorf("gitops label retracted")
+			t.Fatalf("gitops label retracted")
 		}
 		if len(d.Spec.Template.Spec.Volumes) == 0 {
-			return fmt.Errorf("kohen volume retracted")
+			t.Fatalf("kohen volume retracted by gitops apply")
+		}
+		if len(d.Spec.Template.Spec.Containers[0].VolumeMounts) == 0 {
+			t.Fatalf("kohen mount retracted by gitops apply")
 		}
 		if d.Spec.Template.Annotations[configSHAAnnotation] == "" {
-			return fmt.Errorf("kohen stamp retracted")
+			t.Fatalf("kohen stamp retracted by gitops apply")
 		}
-		return nil
-	})
+		time.Sleep(3 * time.Second)
+	}
 }
 
 func gitopsApply(t *testing.T, c client.Client, ns, name string, replicas int64) {

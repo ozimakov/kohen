@@ -69,14 +69,17 @@ jobs:
         run: |
           echo "=== operator logs ==="
           kubectl logs -n kohen-system deploy/kohen --tail=300 || true
-          echo "=== gitserver logs (current) ==="
-          kubectl logs -n kohen-e2e deploy/gitserver --tail=200 || true
-          echo "=== gitserver logs (previous) ==="
-          kubectl logs -n kohen-e2e deploy/gitserver --tail=200 --previous || true
-          echo "=== pods (wide) ==="
-          kubectl get pods -n kohen-e2e -o wide || true
-          echo "=== configsyncs ==="
+          echo "=== configsyncs (all namespaces) ==="
           kubectl get configsync -A -o yaml || true
-          echo "=== e2e namespace ==="
-          kubectl get all,cm -n kohen-e2e || true
-          kubectl describe deploy -n kohen-e2e || true
+          # Each test owns a kohen-e2e-* namespace; dump them all.
+          for ns in $(kubectl get ns -o name | grep -oE 'kohen-e2e[^ ]*' || true); do
+            echo "=== namespace ${ns} ==="
+            kubectl get all,cm -n "${ns}" -o wide || true
+            for gs in $(kubectl get deploy -n "${ns}" -o name | grep gitserver || true); do
+              echo "--- ${gs} logs (current) ---"
+              kubectl logs -n "${ns}" "${gs}" --tail=100 || true
+              echo "--- ${gs} logs (previous) ---"
+              kubectl logs -n "${ns}" "${gs}" --tail=100 --previous || true
+            done
+            kubectl describe deploy -n "${ns}" || true
+          done

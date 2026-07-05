@@ -290,8 +290,11 @@ spec:
 
 ### Flux (Kustomize controller, SSA + drift exclusion)
 
-Flux applies server-side by default. Mark Kohen's fields as managed elsewhere so
-Flux excludes them from drift correction:
+Flux applies server-side by default with the `Override` policy, which reverts
+fields it does not own. Set the `Merge` apply policy on the managed `Deployment`
+so Flux preserves the non-overlapping fields Kohen owns (the annotation values
+are case-sensitive PascalCase: `Override` \| `Merge` \| `IfNotPresent` \|
+`Ignore`):
 
 ```yaml
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -308,17 +311,20 @@ spec:
       patch: |
         - op: add
           path: /metadata/annotations/kustomize.toolkit.fluxcd.io~1ssa
-          value: merge
+          value: Merge
 ```
 
-Alternatively, annotate the managed `Deployment` so Flux ignores drift on the
-subtree Kohen owns:
+Equivalently, annotate the `Deployment` manifest in git directly:
 
 ```yaml
 metadata:
   annotations:
-    kustomize.toolkit.fluxcd.io/ssa: merge
+    kustomize.toolkit.fluxcd.io/ssa: Merge
 ```
+
+Because Kohen's volume/mount are keyed map-list members (by `name`/`mountPath`)
+and its stamp is a discrete annotation, `Merge` preserves them without overlap;
+these are exactly the non-atomic fields the policy can retain.
 
 With SSA + the ignore rules applied, the GitOps controller and Kohen converge on
 the same `Deployment` without flapping: the GitOps controller owns the app spec,
