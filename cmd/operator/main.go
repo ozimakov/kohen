@@ -5,11 +5,14 @@ import (
 	"flag"
 	"os"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -65,12 +68,23 @@ func main() {
 		LeaderElectionID:        "kohen-operator.kohen.dev",
 		LeaderElectionNamespace: leaderNamespace,
 	}
+	// Only cache git-credential Secrets, never all Secret material: this bounds
+	// the compromised-operator blast radius and memory footprint (SPEC TM8, T6).
+	// Kohen only ever reads label-gated credential Secrets (R-AUTH.6).
+	cacheOpts := cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Label: labels.SelectorFromSet(labels.Set{kohenv1alpha1.LabelGitCredential: "true"}),
+			},
+		},
+	}
 	// Namespaced scope: restrict the cache/watch to a single namespace so the
 	// operator needs only namespaced RBAC (SPEC §16 install scopes).
 	if ns := os.Getenv("WATCH_NAMESPACE"); ns != "" {
-		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
+		cacheOpts.DefaultNamespaces = map[string]cache.Config{ns: {}}
 		setupLog.Info("running in namespaced scope", "namespace", ns)
 	}
+	mgrOpts.Cache = cacheOpts
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
