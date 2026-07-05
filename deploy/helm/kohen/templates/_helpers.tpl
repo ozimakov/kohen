@@ -64,7 +64,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   verbs: ["create", "patch"]
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets"]
-  verbs: ["get", "list", "watch", "update", "patch"]
+  verbs: ["get", "list", "watch", "patch"]
 {{- end -}}
 
 {{/* Leader-election needs lease access in the operator's own namespace. */}}

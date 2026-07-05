@@ -357,6 +357,54 @@ func TestPipelineSingletonViolation(t *testing.T) {
 	}
 }
 
+func TestSingletonIncumbentKeepsWorking(t *testing.T) {
+	env := testenv.Start(t)
+	makeDeployment(t, env, "shared")
+	// "aa-first" is created first and sorts first ⇒ it must win.
+	first := makeConfigSync(t, env, "aa-first", "shared", kohenv1alpha1.RolloutAuto)
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "aaaa111122223333"})
+	reconcileN(t, r, client.ObjectKeyFromObject(first), 2)
+
+	second := makeConfigSync(t, env, "zz-second", "shared", kohenv1alpha1.RolloutAuto)
+	reconcileN(t, r, client.ObjectKeyFromObject(second), 2)
+	// Re-reconcile the incumbent now that a rival exists.
+	reconcileN(t, r, client.ObjectKeyFromObject(first), 1)
+
+	csFirst := getCS(t, env, client.ObjectKeyFromObject(first))
+	if c := meta.FindStatusCondition(csFirst.Status.Conditions, kohenv1alpha1.ConditionWorkloadWired); c == nil || c.Status != metav1.ConditionTrue {
+		t.Errorf("incumbent should stay WorkloadWired=True, got %+v", c)
+	}
+	csSecond := getCS(t, env, client.ObjectKeyFromObject(second))
+	if c := meta.FindStatusCondition(csSecond.Status.Conditions, kohenv1alpha1.ConditionWorkloadWired); c == nil || c.Reason != kohenv1alpha1.ReasonSingletonViolation {
+		t.Errorf("newcomer should be SingletonViolation, got %+v", c)
+	}
+}
+
+func TestSyncNowAnnotationCleared(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "snapp")
+	cs := makeConfigSync(t, env, "snsync", "snapp", kohenv1alpha1.RolloutAuto)
+	key := client.ObjectKeyFromObject(cs)
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "5a5a5a5a5a5a5a5a"})
+
+	reconcileN(t, r, key, 1) // add finalizer
+
+	cs = getCS(t, env, key)
+	cs.Annotations = map[string]string{kohenv1alpha1.AnnotationSyncNow: "now"}
+	if err := env.Client.Update(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	reconcileN(t, r, key, 1) // should clear the annotation
+
+	cs = getCS(t, env, key)
+	if _, ok := cs.Annotations[kohenv1alpha1.AnnotationSyncNow]; ok {
+		t.Errorf("sync-now annotation was not cleared: %v", cs.Annotations)
+	}
+}
+
 func TestPipelineWorkloadNotFound(t *testing.T) {
 	env := testenv.Start(t)
 	ctx := context.Background()

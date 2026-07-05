@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	kohenv1alpha1 "github.com/ozimakov/kohen/api/v1alpha1"
 	"github.com/ozimakov/kohen/internal/apply"
@@ -59,6 +60,21 @@ func (r *ConfigSyncReconciler) loadCredential(ctx context.Context, cs *kohenv1al
 	if cred.Password == "" {
 		cred.Password = string(sec.Data["token"])
 	}
+
+	// Insecure transport is an explicit, logged opt-in that the operator must
+	// also permit at install time (SPEC R7.8, R-AUTH.7).
+	if r.Config != nil && r.Config.AllowInsecureGitTLS {
+		log := logf.FromContext(ctx)
+		if string(sec.Data["insecure-skip-tls-verify"]) == "true" {
+			cred.InsecureSkipTLSVerify = true
+			log.Info("insecure git TLS verification enabled for source", "secret", ref.Name)
+		}
+		if string(sec.Data["insecure-ignore-host-key"]) == "true" {
+			cred.InsecureIgnoreHostKey = true
+			log.Info("insecure SSH host-key verification enabled for source", "secret", ref.Name)
+		}
+	}
+
 	if r.Redactor != nil {
 		r.Redactor.Add(cred.Password, cred.Passphrase, string(cred.PrivateKey))
 	}

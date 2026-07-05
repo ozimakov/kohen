@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,12 +19,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kohenv1alpha1 "github.com/ozimakov/kohen/api/v1alpha1"
 	"github.com/ozimakov/kohen/internal/apply"
 	"github.com/ozimakov/kohen/internal/config"
 	"github.com/ozimakov/kohen/internal/git"
+	"github.com/ozimakov/kohen/internal/metrics"
 	"github.com/ozimakov/kohen/internal/redact"
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/rollout"
@@ -57,7 +61,7 @@ type ConfigSyncReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;patch
 
 // Reconcile runs the ConfigSync pipeline.
 func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -80,7 +84,20 @@ func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Force-sync annotation: clear it so re-setting an identical value re-triggers
+	// and callers get a completion signal (SPEC §6.1).
+	if _, ok := cs.Annotations[kohenv1alpha1.AnnotationSyncNow]; ok {
+		delete(cs.Annotations, kohenv1alpha1.AnnotationSyncNow)
+		if err := r.Update(ctx, &cs); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.event(&cs, corev1.EventTypeNormal, "SyncNow", "processed force-sync annotation")
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	result, syncErr := r.sync(ctx, &cs)
+
+	recordReconcileResult(&cs)
 
 	if err := r.Status().Update(ctx, &cs); err != nil {
 		if apierrors.IsConflict(err) {
@@ -126,6 +143,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	}, cred)
 	if err != nil {
 		reason := gitConditionReason(err)
+		metrics.FetchErrors.WithLabelValues(reason).Inc()
 		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, reason, err.Error())
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "fetch failed, serving last-good")
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
@@ -144,6 +162,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	rendered, err := r.Renderer.Render(res.Dir)
 	if err != nil {
 		reason := renderConditionReason(err)
+		metrics.RenderErrors.WithLabelValues(reason).Inc()
 		setCondition(cs, kohenv1alpha1.ConditionRendered, metav1.ConditionFalse, reason, err.Error())
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "render failed, serving last-good")
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
@@ -190,7 +209,8 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	name := cs.Spec.WorkloadRef.Name
 
 	// Existence + strategy support (R-ROLLOUT.5).
-	if reason, msg, ok := r.checkWorkload(ctx, kind, ns, name); !ok {
+	currentStamp, reason, msg, ok := r.inspectWorkload(ctx, kind, ns, name)
+	if !ok {
 		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, msg)
 		r.event(cs, corev1.EventTypeWarning, reason, msg)
 		return false
@@ -228,6 +248,13 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	}
 
 	cs.Status.WorkloadVersion = version
+	// Rollout triggered vs skipped-on-match (R-ROLLOUT.2, R13.1).
+	if currentStamp == version {
+		metrics.RolloutsSkipped.Inc()
+	} else {
+		metrics.RolloutsTriggered.Inc()
+		r.event(cs, corev1.EventTypeNormal, "RolloutTriggered", "config version "+version+" stamped")
+	}
 	p := r.rolloutProgress(ctx, kind, ns, name)
 	status := metav1.ConditionFalse
 	if p.Complete {
@@ -238,33 +265,36 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	return p.Complete
 }
 
-// checkWorkload verifies the workload exists and its strategy is supported.
-func (r *ConfigSyncReconciler) checkWorkload(ctx context.Context, kind, ns, name string) (reason, msg string, ok bool) {
+// inspectWorkload verifies the workload exists and its strategy is supported,
+// and returns the current pod-template config-sha stamp (for rollout
+// triggered-vs-skipped accounting).
+func (r *ConfigSyncReconciler) inspectWorkload(ctx context.Context, kind, ns, name string) (stamp, reason, msg string, ok bool) {
 	key := client.ObjectKey{Namespace: ns, Name: name}
 	switch kind {
 	case "StatefulSet":
 		var ss appsv1.StatefulSet
 		if err := r.Get(ctx, key, &ss); err != nil {
 			if apierrors.IsNotFound(err) {
-				return kohenv1alpha1.ReasonWorkloadNotFound, fmt.Sprintf("StatefulSet %q not found", name), false
+				return "", kohenv1alpha1.ReasonWorkloadNotFound, fmt.Sprintf("StatefulSet %q not found", name), false
 			}
-			return kohenv1alpha1.ReasonDegraded, err.Error(), false
+			return "", kohenv1alpha1.ReasonDegraded, err.Error(), false
 		}
 		if supported, m := rollout.StatefulSetSupported(&ss); !supported {
-			return kohenv1alpha1.ReasonUnsupportedStrategy, m, false
+			return "", kohenv1alpha1.ReasonUnsupportedStrategy, m, false
 		}
+		return ss.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA], "", "", true
 	case "Deployment":
 		var dp appsv1.Deployment
 		if err := r.Get(ctx, key, &dp); err != nil {
 			if apierrors.IsNotFound(err) {
-				return kohenv1alpha1.ReasonWorkloadNotFound, fmt.Sprintf("Deployment %q not found", name), false
+				return "", kohenv1alpha1.ReasonWorkloadNotFound, fmt.Sprintf("Deployment %q not found", name), false
 			}
-			return kohenv1alpha1.ReasonDegraded, err.Error(), false
+			return "", kohenv1alpha1.ReasonDegraded, err.Error(), false
 		}
+		return dp.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA], "", "", true
 	default:
-		return kohenv1alpha1.ReasonUnsupportedStrategy, "unsupported workload kind " + kind, false
+		return "", kohenv1alpha1.ReasonUnsupportedStrategy, "unsupported workload kind " + kind, false
 	}
-	return "", "", true
 }
 
 // rolloutProgress reads the workload and evaluates its rollout state.
@@ -305,7 +335,9 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	return ctrl.Result{}, nil
 }
 
-// singletonConflict reports another live ConfigSync targeting the same workload.
+// singletonConflict reports whether another live ConfigSync targeting the same
+// workload should win over cs. Only the loser (the newer sync) is reported in
+// conflict, so the incumbent keeps reconciling (SPEC R-SINGLETON, §10).
 func (r *ConfigSyncReconciler) singletonConflict(ctx context.Context, cs *kohenv1alpha1.ConfigSync) (string, bool) {
 	var list kohenv1alpha1.ConfigSyncList
 	if err := r.List(ctx, &list, client.InNamespace(cs.Namespace)); err != nil {
@@ -316,11 +348,20 @@ func (r *ConfigSyncReconciler) singletonConflict(ctx context.Context, cs *kohenv
 		if other.Name == cs.Name || !other.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if other.Spec.WorkloadRef == cs.Spec.WorkloadRef {
+		if other.Spec.WorkloadRef == cs.Spec.WorkloadRef && winsOver(other, cs) {
 			return other.Name, true
 		}
 	}
 	return "", false
+}
+
+// winsOver returns whether a should own a shared workload in preference to b:
+// the older ConfigSync wins; ties break on name for determinism.
+func winsOver(a, b *kohenv1alpha1.ConfigSync) bool {
+	if a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.Name < b.Name
+	}
+	return a.CreationTimestamp.Before(&b.CreationTimestamp)
 }
 
 // computeReady derives the overall Ready condition from the sub-conditions.
@@ -386,11 +427,63 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Renderer = render.New(render.Options{})
 	}
 	if r.Fetcher == nil {
-		r.Fetcher = git.NewClient(git.Options{AllowList: r.Config.SourceAllowList})
+		// Wire a real resolver so hostname-based SSRF is guarded, not only
+		// IP-literal hosts (R-AUTH.7 / TM5).
+		r.Fetcher = git.NewClient(git.Options{
+			AllowList: r.Config.SourceAllowList,
+			Resolver:  net.DefaultResolver,
+		})
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kohenv1alpha1.ConfigSync{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("Deployment"))).
+		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("StatefulSet"))).
 		Named("configsync").
 		Complete(r)
+}
+
+// mapWorkload maps a changed workload back to the ConfigSync(s) targeting it, so
+// rollout progress and drift (e.g. another manager stripping Kohen's fields) are
+// reconciled promptly rather than only on the poll interval.
+func (r *ConfigSyncReconciler) mapWorkload(kind string) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var list kohenv1alpha1.ConfigSyncList
+		if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+			return nil
+		}
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			cs := &list.Items[i]
+			if cs.Spec.WorkloadRef.Kind == kind && cs.Spec.WorkloadRef.Name == obj.GetName() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cs)})
+			}
+		}
+		return reqs
+	}
+}
+
+// recordReconcileResult exports the reconcile outcome and degraded gauge.
+func recordReconcileResult(cs *kohenv1alpha1.ConfigSync) {
+	result := "degraded"
+	degraded := 1.0
+	if c := findCondition(cs, kohenv1alpha1.ConditionReady); c != nil {
+		switch {
+		case c.Status == metav1.ConditionTrue:
+			result, degraded = "synced", 0
+		case c.Reason == kohenv1alpha1.ReasonProgressing:
+			result, degraded = "progressing", 0
+		}
+	}
+	metrics.ReconcileTotal.WithLabelValues(result).Inc()
+	metrics.Degraded.WithLabelValues(cs.Namespace, cs.Name).Set(degraded)
+}
+
+func findCondition(cs *kohenv1alpha1.ConfigSync, condType string) *metav1.Condition {
+	for i := range cs.Status.Conditions {
+		if cs.Status.Conditions[i].Type == condType {
+			return &cs.Status.Conditions[i]
+		}
+	}
+	return nil
 }
