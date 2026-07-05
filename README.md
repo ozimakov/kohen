@@ -16,3 +16,11 @@ the acceptance criteria. Start with the minimal example (SPEC §1.2) and the
 The implementation sequence toward **v1.0** — broken into independently
 buildable steps (each with its own tests) plus dedicated `kind`-based usability
 milestones — is in [`PLAN.md`](./PLAN.md).
+
+## Getting started
+
+The [Getting Started & GitOps Coexistence runbook](./docs/getting-started-and-gitops.md)
+is the verified, copy-pasteable path for the config-only journey: install via
+Helm, sync a git path to a workload, roll out on config changes, wire private
+repo auth, and coexist with Argo CD / Flux. It is exercised end-to-end in CI on
+`kind` (see [`test/e2e`](./test/e2e)).
