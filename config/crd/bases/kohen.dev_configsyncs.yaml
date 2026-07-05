@@ -380,6 +380,13 @@ spec:
                       - externalSecret
                       - nativeSecret
                       type: string
+                    established:
+                      description: |-
+                        Established is a sticky marker: once a reference has been resolved as part
+                        of an applied config version, it stays true. It drives the asymmetric
+                        readiness policy (R8.9) — an established reference that becomes
+                        transiently not-ready fails safe (keep last-good) rather than fail closed.
+                      type: boolean
                     name:
                       description: Name of the reference.
                       type: string

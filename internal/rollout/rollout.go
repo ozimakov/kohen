@@ -11,7 +11,11 @@ package rollout
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -43,11 +47,36 @@ func ShortCommit(commit string) string {
 	return commit[:ShortCommitLen]
 }
 
-// Version returns the config version for a resolved commit. In Phase 1 (no
-// env-surfaced secrets) the normative format is "git:<short-commit>" (R-CONS);
-// Phase 2 appends "-sec:<hash>" when secrets are env-surfaced.
+// SecretHashLen is the number of leading hex characters of the env-surfaced
+// secret-token hash used in the config version's "-sec:" component. Long enough
+// to be collision-resistant, short enough to stay readable in status/metadata.
+const SecretHashLen = 12
+
+// Version returns the config version for a resolved commit with no env-surfaced
+// secrets. The normative format is "git:<short-commit>" (R-CONS).
 func Version(commit string) string {
 	return "git:" + ShortCommit(commit)
+}
+
+// VersionWithSecrets returns the config version extended with the env-surfaced
+// secret component when envTokens is non-empty:
+//
+//	git:<short-commit>-sec:<hash of env-surfaced secret version tokens>
+//
+// per SPEC R-CONS. The tokens are sorted and joined before hashing so the
+// result is deterministic and independent of reference ordering. Only
+// env-surfaced tokens participate — file-surfaced rotation is delivered by
+// kubelet and MUST NOT change the version (R8.5). Tokens are metadata-derived,
+// never secret values (R8.10).
+func VersionWithSecrets(commit string, envTokens []string) string {
+	base := Version(commit)
+	if len(envTokens) == 0 {
+		return base
+	}
+	sorted := append([]string(nil), envTokens...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\x00")))
+	return base + "-sec:" + hex.EncodeToString(sum[:])[:SecretHashLen]
 }
 
 // StatefulSetSupported reports whether a StatefulSet's update strategy can be

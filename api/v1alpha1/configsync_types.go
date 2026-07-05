@@ -268,6 +268,12 @@ type SecretRefStatus struct {
 	// Reason explains a non-resolved state.
 	// +optional
 	Reason string `json:"reason,omitempty"`
+	// Established is a sticky marker: once a reference has been resolved as part
+	// of an applied config version, it stays true. It drives the asymmetric
+	// readiness policy (R8.9) — an established reference that becomes
+	// transiently not-ready fails safe (keep last-good) rather than fail closed.
+	// +optional
+	Established bool `json:"established,omitempty"`
 }
 
 // ConfigSyncStatus is the observed state of a ConfigSync (SPEC §11.1, §11.4).

@@ -23,6 +23,35 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+func TestVersionWithSecrets(t *testing.T) {
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	base := rollout.Version(commit)
+
+	// No env tokens ⇒ identical to Version (file-only / no secrets, R8.5).
+	if got := rollout.VersionWithSecrets(commit, nil); got != base {
+		t.Fatalf("empty tokens = %q, want %q", got, base)
+	}
+
+	// Env tokens ⇒ base + "-sec:<hash>" with the documented length.
+	got := rollout.VersionWithSecrets(commit, []string{"db=tok1"})
+	prefix := base + "-sec:"
+	if len(got) != len(prefix)+rollout.SecretHashLen || got[:len(prefix)] != prefix {
+		t.Fatalf("VersionWithSecrets = %q, want %s<%d hex>", got, prefix, rollout.SecretHashLen)
+	}
+
+	// Deterministic and order-independent.
+	a := rollout.VersionWithSecrets(commit, []string{"a=1", "b=2"})
+	b := rollout.VersionWithSecrets(commit, []string{"b=2", "a=1"})
+	if a != b {
+		t.Errorf("token order changed the version: %q vs %q", a, b)
+	}
+
+	// Different tokens ⇒ different version (rotation advances it).
+	if rollout.VersionWithSecrets(commit, []string{"db=tok1"}) == rollout.VersionWithSecrets(commit, []string{"db=tok2"}) {
+		t.Errorf("distinct tokens must produce distinct versions")
+	}
+}
+
 func TestStatefulSetSupported(t *testing.T) {
 	ok := &appsv1.StatefulSet{Spec: appsv1.StatefulSetSpec{
 		UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.RollingUpdateStatefulSetStrategyType}}}

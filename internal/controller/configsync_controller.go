@@ -31,6 +31,7 @@ import (
 	"github.com/ozimakov/kohen/internal/redact"
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/rollout"
+	"github.com/ozimakov/kohen/internal/secret"
 	"github.com/ozimakov/kohen/internal/wire"
 )
 
@@ -53,6 +54,11 @@ type ConfigSyncReconciler struct {
 	Wirer    *wire.Wirer
 	Redactor *redact.Redactor
 	Config   *config.Config
+
+	// Resolvers maps a secret backend to its resolver (SPEC §8, S2.2+). Native
+	// and ESO resolvers are registered in SetupWithManager; tests may inject a
+	// fake.
+	Resolvers map[secret.Backend]secret.Resolver
 }
 
 // +kubebuilder:rbac:groups=kohen.dev,resources=configsyncs,verbs=get;list;watch;create;update;patch;delete
@@ -191,8 +197,26 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 		return ctrl.Result{}, err
 	}
 
-	// Version and workload wiring / stamping.
-	version := rollout.Version(res.Commit)
+	// Resolve secret references (§8). Secrets gate advancing to the new config
+	// version: fail closed on first resolution, fail safe on a transient
+	// backend outage with a prior good version (R8.9), bounded by
+	// maxDegradedDuration (R8.11).
+	now := time.Now()
+	decision := r.resolveSecrets(ctx, cs, now)
+	if !decision.AllReady {
+		if decision.MaxDegradedExceeded {
+			metrics.MaxDegradedExceededTotal.Inc()
+			r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonMaxDegradedExceeded, decision.Message)
+		}
+		// Keep last-good: do not wire secret surfaces or stamp the new version.
+		r.setReady(cs, metav1.ConditionFalse, decision.ReadyReason, decision.Message)
+		return ctrl.Result{RequeueAfter: progressingRequeue}, nil
+	}
+
+	// Version and workload wiring / stamping. Env-surfaced secret tokens fold
+	// into the config version so their rotation triggers a rollout (R-CONS,
+	// R8.5); file-surfaced rotation does not.
+	version := rollout.VersionWithSecrets(res.Commit, decision.EnvTokens)
 	cs.Status.ConfigVersion = version
 	metrics.SetConfigVersion(cs.Namespace, cs.Name, version)
 	rolloutComplete := r.wireAndStamp(ctx, cs, cmName, version)
@@ -395,6 +419,7 @@ func (r *ConfigSyncReconciler) computeReady(cs *kohenv1alpha1.ConfigSync) {
 	for _, t := range []string{
 		kohenv1alpha1.ConditionFetched,
 		kohenv1alpha1.ConditionRendered,
+		kohenv1alpha1.ConditionSecretsReady,
 		kohenv1alpha1.ConditionWorkloadWired,
 	} {
 		if !conditionTrue(cs, t) {
@@ -452,6 +477,12 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Renderer == nil {
 		r.Renderer = render.New(render.Options{})
 	}
+	if r.Resolvers == nil {
+		// Backend resolvers are registered by later steps (native — S2.3; ESO —
+		// S2.4). An unregistered backend resolves to BackendNotReady, failing
+		// closed rather than silently wiring nothing.
+		r.Resolvers = map[secret.Backend]secret.Resolver{}
+	}
 	if r.Fetcher == nil {
 		// Wire a real resolver so hostname-based SSRF is guarded, not only
 		// IP-literal hosts (R-AUTH.7 / TM5).
@@ -467,8 +498,31 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("Deployment"))).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("StatefulSet"))).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecret)).
 		Named("configsync").
 		Complete(r)
+}
+
+// mapSecret maps a changed Secret back to the ConfigSync(s) that reference it,
+// so secret creation/rotation triggers a prompt reconcile rather than waiting
+// for the poll interval (SPEC §6.1, T10). It matches both native Secrets and
+// ESO target Secrets (which share the ExternalSecret's name by default).
+func (r *ConfigSyncReconciler) mapSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list kohenv1alpha1.ConfigSyncList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		cs := &list.Items[i]
+		for j := range cs.Spec.SecretRefs {
+			if cs.Spec.SecretRefs[j].SecretName() == obj.GetName() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cs)})
+				break
+			}
+		}
+	}
+	return reqs
 }
 
 // mapWorkload maps a changed workload back to the ConfigSync(s) targeting it, so
