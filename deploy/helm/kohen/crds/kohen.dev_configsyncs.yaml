@@ -58,8 +58,12 @@ spec:
           metadata:
             type: object
           spec:
-            description: ConfigSyncSpec defines the desired state of a ConfigSync
-              (SPEC §11.1).
+            description: |-
+              ConfigSyncSpec defines the desired state of a ConfigSync (SPEC §11.1).
+              The env/file distinction below is expressed through the presence of
+              surface.envVar / surface.mountPath (a CEL-safe proxy for surface.as; see
+              SecretSurface) so the rules can compile without naming the reserved `as`
+              field.
             properties:
               configMap:
                 description: ConfigMap configures the target ConfigMap.
@@ -83,13 +87,14 @@ spec:
                 - none
                 type: string
               secretRefs:
-                description: SecretRefs declares secrets the config references (Phase
-                  2).
+                description: |-
+                  SecretRefs declares secrets the config references and how they surface
+                  into the workload (SPEC §8). Bounded to keep CEL validation cost within
+                  the API server budget; one ConfigSync per workload rarely needs many.
                 items:
                   description: |-
-                    SecretReference declares a secret the config references. The full resolution
-                    and surfacing behavior is delivered in Phase 2 (S2.1+); this shape reserves
-                    the API field.
+                    SecretReference declares a secret the config references and how it is
+                    surfaced into the workload (SPEC §8.1, §8.4).
                   properties:
                     backend:
                       description: Backend selects the resolution mechanism.
@@ -109,8 +114,13 @@ spec:
                       - name
                       type: object
                     name:
-                      description: Name is the unique local name of this reference.
+                      description: |-
+                        Name is the unique local name of this reference. It must be a DNS-1123
+                        label so it can form a deterministic, valid volume name when surfaced as
+                        a file.
+                      maxLength: 50
                       minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     nativeSecret:
                       description: NativeSecret references a native Secret (backend=nativeSecret).
@@ -122,10 +132,63 @@ spec:
                       required:
                       - name
                       type: object
+                    surface:
+                      description: Surface configures how the resolved secret is wired
+                        into the pod.
+                      properties:
+                        as:
+                          description: As selects file or env surfacing.
+                          enum:
+                          - file
+                          - env
+                          type: string
+                        envVar:
+                          description: EnvVar is the environment variable name to
+                            inject (as=env).
+                          maxLength: 253
+                          type: string
+                        key:
+                          description: Key is the Secret data key exposed via the
+                            env var (as=env).
+                          maxLength: 253
+                          type: string
+                        mountPath:
+                          description: |-
+                            MountPath is the mount path for the secret volume (as=file). Kohen never
+                            uses subPath, so kubelet delivers rotations in place (R8.5).
+                          maxLength: 253
+                          type: string
+                        rolloutOnRotate:
+                          default: true
+                          description: |-
+                            RolloutOnRotate controls whether an env-surfaced rotation advances the
+                            config version and rolls the workload (SPEC R8.5). Defaults to true.
+                            File-surfaced references ignore this (kubelet delivers rotations in
+                            place, never a rollout).
+                          type: boolean
+                      required:
+                      - as
+                      type: object
+                      x-kubernetes-validations:
+                      - message: surface must set mountPath (as=file) or both envVar
+                          and key (as=env), and only those fields
+                        rule: (has(self.mountPath) && !has(self.envVar) && !has(self.key))
+                          || (!has(self.mountPath) && has(self.envVar) && has(self.key))
                   required:
                   - backend
                   - name
+                  - surface
                   type: object
+                  x-kubernetes-validations:
+                  - message: backend externalSecret requires the externalSecret ref
+                      and forbids nativeSecret
+                    rule: self.backend != 'externalSecret' || (has(self.externalSecret)
+                      && !has(self.nativeSecret))
+                  - message: backend nativeSecret requires the nativeSecret ref and
+                      forbids externalSecret
+                    rule: self.backend != 'nativeSecret' || (has(self.nativeSecret)
+                      && !has(self.externalSecret))
+                maxItems: 32
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -183,6 +246,7 @@ spec:
                   mountPath:
                     default: /etc/kohen/config
                     description: MountPath is the volume mount path for the config.
+                    maxLength: 253
                     type: string
                 type: object
               workloadRef:
@@ -211,6 +275,22 @@ spec:
             x-kubernetes-validations:
             - message: path must be a repository-relative path without '..' segments
               rule: '!self.path.startsWith(''/'') && !self.path.contains(''..'')'
+            - message: 'env-surfaced secretRefs require a rollout; remove rollout:
+                none or use surface.as=file (SPEC §9.1)'
+              rule: self.rollout != 'none' || !has(self.secretRefs) || self.secretRefs.all(r,
+                !has(r.surface.envVar))
+            - message: secretRefs file mountPaths must be unique (R8.12)
+              rule: '!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.mountPath)).all(r1,
+                self.secretRefs.filter(r2, has(r2.surface.mountPath) && r2.surface.mountPath
+                == r1.surface.mountPath).size() == 1)'
+            - message: secretRefs env var names must be unique (R8.12)
+              rule: '!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.envVar)).all(r1,
+                self.secretRefs.filter(r2, has(r2.surface.envVar) && r2.surface.envVar
+                == r1.surface.envVar).size() == 1)'
+            - message: a secretRef file mountPath must not equal wiring.mountPath
+                (R8.12)
+              rule: '!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.mountPath)).all(r,
+                r.surface.mountPath != self.wiring.mountPath)'
           status:
             description: ConfigSyncStatus is the observed state of a ConfigSync (SPEC
               §11.1, §11.4).

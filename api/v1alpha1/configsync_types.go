@@ -85,6 +85,7 @@ type Wiring struct {
 
 	// MountPath is the volume mount path for the config.
 	// +kubebuilder:default=/etc/kohen/config
+	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 }
@@ -108,12 +109,68 @@ const (
 	SurfaceEnv SecretSurfaceMode = "env"
 )
 
-// SecretReference declares a secret the config references. The full resolution
-// and surfacing behavior is delivered in Phase 2 (S2.1+); this shape reserves
-// the API field.
+// SecretSurface configures how a resolved secret is wired into the pod (SPEC
+// §8.4). File surfacing mounts the backing Secret as a volume; env surfacing
+// injects a single key as a discrete env entry with valueFrom.secretKeyRef
+// (no envFrom — R-WIRE.2).
+//
+// The `as` field is a CEL-reserved keyword and cannot be referenced by an
+// OpenAPI validation rule, so CEL enforces the mode-specific field set by
+// presence (a surface carries EITHER mountPath, for file, XOR envVar+key, for
+// env); the reconciler additionally verifies that `as` matches the field set
+// (SPEC R11.1) and fails the reference closed if not.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.mountPath) && !has(self.envVar) && !has(self.key)) || (!has(self.mountPath) && has(self.envVar) && has(self.key))",message="surface must set mountPath (as=file) or both envVar and key (as=env), and only those fields"
+type SecretSurface struct {
+	// As selects file or env surfacing.
+	As SecretSurfaceMode `json:"as"`
+
+	// MountPath is the mount path for the secret volume (as=file). Kohen never
+	// uses subPath, so kubelet delivers rotations in place (R8.5).
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	MountPath string `json:"mountPath,omitempty"`
+
+	// EnvVar is the environment variable name to inject (as=env).
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	EnvVar string `json:"envVar,omitempty"`
+
+	// Key is the Secret data key exposed via the env var (as=env).
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	Key string `json:"key,omitempty"`
+
+	// RolloutOnRotate controls whether an env-surfaced rotation advances the
+	// config version and rolls the workload (SPEC R8.5). Defaults to true.
+	// File-surfaced references ignore this (kubelet delivers rotations in
+	// place, never a rollout).
+	// +kubebuilder:default=true
+	// +optional
+	RolloutOnRotate *bool `json:"rolloutOnRotate,omitempty"`
+}
+
+// ShouldRolloutOnRotate reports the effective rolloutOnRotate value, applying
+// the true default when unset (SPEC §11.2).
+func (s *SecretSurface) ShouldRolloutOnRotate() bool {
+	if s.RolloutOnRotate == nil {
+		return true
+	}
+	return *s.RolloutOnRotate
+}
+
+// SecretReference declares a secret the config references and how it is
+// surfaced into the workload (SPEC §8.1, §8.4).
+//
+// +kubebuilder:validation:XValidation:rule="self.backend != 'externalSecret' || (has(self.externalSecret) && !has(self.nativeSecret))",message="backend externalSecret requires the externalSecret ref and forbids nativeSecret"
+// +kubebuilder:validation:XValidation:rule="self.backend != 'nativeSecret' || (has(self.nativeSecret) && !has(self.externalSecret))",message="backend nativeSecret requires the nativeSecret ref and forbids externalSecret"
 type SecretReference struct {
-	// Name is the unique local name of this reference.
+	// Name is the unique local name of this reference. It must be a DNS-1123
+	// label so it can form a deterministic, valid volume name when surfaced as
+	// a file.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// Backend selects the resolution mechanism.
@@ -126,10 +183,38 @@ type SecretReference struct {
 	// NativeSecret references a native Secret (backend=nativeSecret).
 	// +optional
 	NativeSecret *LocalObjectReference `json:"nativeSecret,omitempty"`
+
+	// Surface configures how the resolved secret is wired into the pod.
+	Surface SecretSurface `json:"surface"`
+}
+
+// SecretName returns the name of the backing Secret/object this reference points
+// at (the ExternalSecret name for the ESO backend — whose target Secret shares
+// the name by default — or the native Secret name).
+func (r *SecretReference) SecretName() string {
+	switch r.Backend {
+	case BackendExternalSecret:
+		if r.ExternalSecret != nil {
+			return r.ExternalSecret.Name
+		}
+	case BackendNativeSecret:
+		if r.NativeSecret != nil {
+			return r.NativeSecret.Name
+		}
+	}
+	return ""
 }
 
 // ConfigSyncSpec defines the desired state of a ConfigSync (SPEC §11.1).
 // +kubebuilder:validation:XValidation:rule="!self.path.startsWith('/') && !self.path.contains('..')",message="path must be a repository-relative path without '..' segments"
+// The env/file distinction below is expressed through the presence of
+// surface.envVar / surface.mountPath (a CEL-safe proxy for surface.as; see
+// SecretSurface) so the rules can compile without naming the reserved `as`
+// field.
+// +kubebuilder:validation:XValidation:rule="self.rollout != 'none' || !has(self.secretRefs) || self.secretRefs.all(r, !has(r.surface.envVar))",message="env-surfaced secretRefs require a rollout; remove rollout: none or use surface.as=file (SPEC §9.1)"
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.mountPath)).all(r1, self.secretRefs.filter(r2, has(r2.surface.mountPath) && r2.surface.mountPath == r1.surface.mountPath).size() == 1)",message="secretRefs file mountPaths must be unique (R8.12)"
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.envVar)).all(r1, self.secretRefs.filter(r2, has(r2.surface.envVar) && r2.surface.envVar == r1.surface.envVar).size() == 1)",message="secretRefs env var names must be unique (R8.12)"
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRefs) || self.secretRefs.filter(r, has(r.surface.mountPath)).all(r, r.surface.mountPath != self.wiring.mountPath)",message="a secretRef file mountPath must not equal wiring.mountPath (R8.12)"
 type ConfigSyncSpec struct {
 	// Source is the git repository, ref, and optional credentials.
 	Source GitSource `json:"source"`
@@ -160,8 +245,11 @@ type ConfigSyncSpec struct {
 	// +optional
 	Sync SyncSpec `json:"sync,omitempty"`
 
-	// SecretRefs declares secrets the config references (Phase 2).
+	// SecretRefs declares secrets the config references and how they surface
+	// into the workload (SPEC §8). Bounded to keep CEL validation cost within
+	// the API server budget; one ConfigSync per workload rarely needs many.
 	// +optional
+	// +kubebuilder:validation:MaxItems=32
 	// +listType=map
 	// +listMapKey=name
 	SecretRefs []SecretReference `json:"secretRefs,omitempty"`
