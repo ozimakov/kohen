@@ -231,6 +231,28 @@ func TestPipelineRolloutNoneStampsObject(t *testing.T) {
 	if _, ok := d.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA]; ok {
 		t.Errorf("pod template must not be stamped in none mode")
 	}
+	// The config volume/mount must still be present: the object-level stamp must
+	// not retract the pod-template wiring (C1 — the two SSA applies must not use
+	// the same field manager with disjoint field sets).
+	if len(d.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("config volume stripped in none mode: %+v", d.Spec.Template.Spec.Volumes)
+	}
+	if len(d.Spec.Template.Spec.Containers[0].VolumeMounts) != 1 ||
+		d.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath != "/etc/kohen/config" {
+		t.Fatalf("config mount stripped in none mode: %+v", d.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+	// Steady state: extra reconciles must not churn the pod template (no restart).
+	genBefore := d.Generation
+	reconcileN(t, r, key, 2)
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "napp", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Generation != genBefore {
+		t.Errorf("none mode churned the workload: generation %d -> %d", genBefore, d.Generation)
+	}
+	if len(d.Spec.Template.Spec.Volumes) != 1 {
+		t.Errorf("config volume not stable across reconciles: %+v", d.Spec.Template.Spec.Volumes)
+	}
 	cs = getCS(t, env, key)
 	if condStatus(cs, kohenv1alpha1.ConditionReady) != metav1.ConditionTrue {
 		t.Errorf("expected Ready True in none mode, got %+v", cs.Status.Conditions)
@@ -378,6 +400,48 @@ func TestSingletonIncumbentKeepsWorking(t *testing.T) {
 	csSecond := getCS(t, env, client.ObjectKeyFromObject(second))
 	if c := meta.FindStatusCondition(csSecond.Status.Conditions, kohenv1alpha1.ConditionWorkloadWired); c == nil || c.Reason != kohenv1alpha1.ReasonSingletonViolation {
 		t.Errorf("newcomer should be SingletonViolation, got %+v", c)
+	}
+}
+
+func TestSingletonLoserDeletionKeepsIncumbentWired(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "shared2")
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "abcabcabcabc1234"})
+
+	// Incumbent wins and wires the workload.
+	incumbent := makeConfigSync(t, env, "aa-owner", "shared2", kohenv1alpha1.RolloutAuto)
+	reconcileN(t, r, client.ObjectKeyFromObject(incumbent), 2)
+
+	d := &appsv1.Deployment{}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "shared2", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Spec.Template.Spec.Volumes) != 1 {
+		t.Fatalf("incumbent did not wire the workload: %+v", d.Spec.Template.Spec.Volumes)
+	}
+
+	// A losing duplicate targets the same workload, then is deleted.
+	loser := makeConfigSync(t, env, "zz-loser", "shared2", kohenv1alpha1.RolloutAuto)
+	reconcileN(t, r, client.ObjectKeyFromObject(loser), 2)
+	loser = getCS(t, env, client.ObjectKeyFromObject(loser))
+	if err := env.Client.Delete(ctx, loser); err != nil {
+		t.Fatal(err)
+	}
+	reconcileN(t, r, client.ObjectKeyFromObject(loser), 2)
+
+	// The incumbent's wiring MUST survive the loser's finalizer (H-A): a shared
+	// field manager means an unconditional Unwire would retract the incumbent's
+	// volume/mount on the shared workload.
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "shared2", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Spec.Template.Spec.Volumes) != 1 {
+		t.Errorf("incumbent workload was unwired by loser deletion: %+v", d.Spec.Template.Spec.Volumes)
+	}
+	if len(d.Spec.Template.Spec.Containers[0].VolumeMounts) != 1 {
+		t.Errorf("incumbent mount removed by loser deletion")
 	}
 }
 

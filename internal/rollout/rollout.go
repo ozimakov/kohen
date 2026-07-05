@@ -20,8 +20,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kohenv1alpha1 "github.com/ozimakov/kohen/api/v1alpha1"
-	"github.com/ozimakov/kohen/internal/wire"
 )
+
+// StampFieldManager owns ONLY the workload object-level config-sha annotation
+// written in rollout: none mode. It is deliberately distinct from the wire
+// package's field manager (which owns the pod-template volume/mount/annotation):
+// two Server-Side Apply requests by the *same* manager replace that manager's
+// entire owned field set, so sharing a manager between the object-metadata stamp
+// and the pod-template wiring would make each apply retract the other's fields
+// (stripping the config volume and churning the pod template every reconcile).
+const StampFieldManager = "kohen-stamp"
 
 // ShortCommitLen is the number of leading hex characters used in the version
 // string (long enough to be collision-resistant, short enough to be readable).
@@ -130,5 +138,5 @@ func StampNoRestart(ctx context.Context, c client.Client, kind, ns, name, versio
 	obj.SetNamespace(ns)
 	obj.SetName(name)
 	obj.SetAnnotations(map[string]string{kohenv1alpha1.AnnotationConfigSHA: version})
-	return c.Patch(ctx, obj, client.Apply, client.FieldOwner(wire.FieldManager))
+	return c.Patch(ctx, obj, client.Apply, client.FieldOwner(StampFieldManager))
 }

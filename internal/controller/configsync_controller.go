@@ -322,12 +322,21 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	if !controllerutil.ContainsFinalizer(cs, FinalizerName) {
 		return ctrl.Result{}, nil
 	}
-	if err := r.Wirer.Unwire(ctx, cs.Spec.WorkloadRef.Kind, cs.Namespace, cs.Spec.WorkloadRef.Name); err != nil {
-		return ctrl.Result{}, err
+	// Only unwire if this ConfigSync legitimately owns the workload wiring.
+	// The wire field manager is shared across syncs, so a singleton loser (which
+	// never wired) must NOT unwire — that would retract the incumbent's fields on
+	// the shared workload (H-A / R-WIRE.6, R-SINGLETON).
+	if _, conflict := r.singletonConflict(ctx, cs); !conflict {
+		if err := r.Wirer.Unwire(ctx, cs.Spec.WorkloadRef.Kind, cs.Namespace, cs.Spec.WorkloadRef.Name); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
+	// Prune is owner-scoped, so it only removes this sync's own ConfigMaps.
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Drop the per-object degraded gauge so deleted syncs don't leak a series.
+	metrics.Degraded.DeleteLabelValues(cs.Namespace, cs.Name)
 	controllerutil.RemoveFinalizer(cs, FinalizerName)
 	if err := r.Update(ctx, cs); err != nil {
 		return ctrl.Result{}, err
