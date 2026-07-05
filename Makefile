@@ -17,6 +17,11 @@ ENVTEST_VERSION ?= release-0.19
 ENVTEST ?= $(GOBIN)/setup-envtest
 ENVTEST_K8S_VERSION ?= 1.31.0
 
+# Image names/tags for local e2e; overridable in CI.
+IMG ?= kohen:e2e
+GITSERVER_IMG ?= kohen-e2e-gitserver:e2e
+KIND_CLUSTER ?= kohen
+
 .DEFAULT_GOAL := help
 
 ##@ General
@@ -72,6 +77,22 @@ test-integration: $(ENVTEST) ## Run all tests including envtest (Tier 2).
 cover: ## Run tests and produce a coverage profile.
 	$(GO) test -race -count=1 -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -n 1
+
+##@ End-to-end (Tier 3, kind)
+
+.PHONY: docker-build
+docker-build: ## Build the operator and e2e gitserver images.
+	docker build -t $(IMG) -f Dockerfile .
+	docker build -t $(GITSERVER_IMG) -f test/e2e/gitserver/Dockerfile .
+
+.PHONY: kind-load
+kind-load: ## Load the built images into the kind cluster.
+	kind load docker-image $(IMG) --name $(KIND_CLUSTER)
+	kind load docker-image $(GITSERVER_IMG) --name $(KIND_CLUSTER)
+
+.PHONY: e2e
+e2e: ## Run the U1 e2e suite (requires a kind cluster with Kohen installed and images loaded).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 20m -v ./test/e2e/...
 
 .PHONY: vet
 vet: ## Run go vet.
