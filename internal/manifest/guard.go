@@ -78,16 +78,71 @@ func (g Guard) Check(u *unstructured.Unstructured) error {
 		}
 	}
 	if len(g.StoreAllowList) > 0 {
-		store, _, _ := unstructured.NestedString(u.Object, "spec", "secretStoreRef", "name")
-		if !allowed(store, g.StoreAllowList) {
+		stores, hasGenerator := collectStoreRefs(u)
+		// A generator source has no store to allow-list; when a store policy is
+		// in force it cannot be verified, so fail closed (R-AUTH.4).
+		if hasGenerator {
 			return &GuardError{
 				Reason: ReasonStoreNotAllowed,
-				Msg: fmt.Sprintf("manifest %q references secret store %q which is not in the operator allow-list",
-					u.GetName(), store),
+				Msg: fmt.Sprintf("manifest %q uses a generatorRef, which cannot be validated against the secret-store allow-list",
+					u.GetName()),
+			}
+		}
+		// No verifiable store reference at all: cannot confirm the source, fail
+		// closed rather than apply an unconstrained manifest.
+		if len(stores) == 0 {
+			return &GuardError{
+				Reason: ReasonStoreNotAllowed,
+				Msg:    fmt.Sprintf("manifest %q has no secretStoreRef to validate against the allow-list", u.GetName()),
+			}
+		}
+		// Every referenced store — top-level and per-entry sourceRef — must be
+		// permitted (R-AUTH.4/TM2): a benign top-level ref must not mask a
+		// disallowed per-key override.
+		for _, s := range stores {
+			if !allowed(s, g.StoreAllowList) {
+				return &GuardError{
+					Reason: ReasonStoreNotAllowed,
+					Msg: fmt.Sprintf("manifest %q references secret store %q which is not in the operator allow-list",
+						u.GetName(), s),
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// collectStoreRefs gathers every secret-store name an ExternalSecret references
+// — the top-level spec.secretStoreRef and each spec.data[]/spec.dataFrom[]
+// sourceRef.storeRef — and reports whether any entry uses a generatorRef (which
+// references no store). Enumerating all of them prevents an allow-listed
+// top-level store from masking a disallowed per-entry override (R-AUTH.4/TM2).
+func collectStoreRefs(u *unstructured.Unstructured) (names []string, hasGenerator bool) {
+	if name, found, _ := unstructured.NestedString(u.Object, "spec", "secretStoreRef", "name"); found && name != "" {
+		names = append(names, name)
+	}
+	for _, field := range []string{"data", "dataFrom"} {
+		entries, _, _ := unstructured.NestedSlice(u.Object, "spec", field)
+		for _, e := range entries {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			src, ok := em["sourceRef"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, hasGen := src["generatorRef"]; hasGen {
+				hasGenerator = true
+			}
+			if storeRef, ok := src["storeRef"].(map[string]any); ok {
+				if name, ok := storeRef["name"].(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	return names, hasGenerator
 }
 
 func allowed(v string, list []string) bool {

@@ -83,6 +83,70 @@ func TestGuardNoStoreAllowListPermitsAnyStore(t *testing.T) {
 	}
 }
 
+// TestGuardRejectsDisallowedPerEntryStore: a benign top-level secretStoreRef
+// must not mask a disallowed per-key sourceRef.storeRef (R-AUTH.4/TM2).
+func TestGuardRejectsDisallowedPerEntryStore(t *testing.T) {
+	u := externalSecret("db", "team-a", "vault")
+	_ = unstructured.SetNestedSlice(u.Object, []any{
+		map[string]any{
+			"secretKey": "password",
+			"sourceRef": map[string]any{
+				"storeRef": map[string]any{"name": "rogue-store", "kind": "SecretStore"},
+			},
+		},
+	}, "spec", "data")
+	g := manifest.Guard{Namespace: "team-a", StoreAllowList: []string{"vault"}}
+	err := g.Check(u)
+	if r, _ := manifest.GuardReasonOf(err); r != manifest.ReasonStoreNotAllowed {
+		t.Fatalf("reason = %v, want StoreNotAllowed for per-entry store bypass (err %v)", r, err)
+	}
+}
+
+// TestGuardAcceptsAllPerEntryStoresAllowed: when every referenced store (top
+// level and per-entry) is allow-listed, the manifest passes.
+func TestGuardAcceptsAllPerEntryStoresAllowed(t *testing.T) {
+	u := externalSecret("db", "team-a", "vault")
+	_ = unstructured.SetNestedSlice(u.Object, []any{
+		map[string]any{
+			"secretKey": "password",
+			"sourceRef": map[string]any{"storeRef": map[string]any{"name": "vault2"}},
+		},
+	}, "spec", "dataFrom")
+	g := manifest.Guard{Namespace: "team-a", StoreAllowList: []string{"vault", "vault2"}}
+	if err := g.Check(u); err != nil {
+		t.Errorf("all stores allow-listed but rejected: %v", err)
+	}
+}
+
+// TestGuardRejectsGeneratorWhenStoreAllowListSet: a generatorRef has no store
+// to allow-list, so it fails closed under a store policy (R-AUTH.4).
+func TestGuardRejectsGeneratorWhenStoreAllowListSet(t *testing.T) {
+	u := externalSecret("db", "team-a", "")
+	_ = unstructured.SetNestedSlice(u.Object, []any{
+		map[string]any{
+			"sourceRef": map[string]any{
+				"generatorRef": map[string]any{"apiVersion": "generators.external-secrets.io/v1alpha1", "kind": "Password", "name": "pw"},
+			},
+		},
+	}, "spec", "data")
+	g := manifest.Guard{Namespace: "team-a", StoreAllowList: []string{"vault"}}
+	err := g.Check(u)
+	if r, _ := manifest.GuardReasonOf(err); r != manifest.ReasonStoreNotAllowed {
+		t.Fatalf("reason = %v, want StoreNotAllowed for generatorRef (err %v)", r, err)
+	}
+}
+
+// TestGuardRejectsNoStoreRefWhenAllowListSet: a manifest with no verifiable
+// store reference cannot be confirmed and fails closed under a store policy.
+func TestGuardRejectsNoStoreRefWhenAllowListSet(t *testing.T) {
+	u := externalSecret("db", "team-a", "") // no top-level store, no data
+	g := manifest.Guard{Namespace: "team-a", StoreAllowList: []string{"vault"}}
+	err := g.Check(u)
+	if r, _ := manifest.GuardReasonOf(err); r != manifest.ReasonStoreNotAllowed {
+		t.Fatalf("reason = %v, want StoreNotAllowed for missing store (err %v)", r, err)
+	}
+}
+
 func TestGuardRejectsNameless(t *testing.T) {
 	g := manifest.Guard{Namespace: "team-a"}
 	err := g.Check(externalSecret("", "team-a", "vault"))

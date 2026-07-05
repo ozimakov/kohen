@@ -210,6 +210,68 @@ func TestManifestGuardRailStoreNotAllowed(t *testing.T) {
 	}
 }
 
+// TestManifestNoAdoption: a pre-existing, un-owned ExternalSecret is never
+// adopted/overwritten (R8.8); the reconcile fails closed terminally.
+func TestManifestNoAdoption(t *testing.T) {
+	env := testenv.Start(t, "test/crds")
+	ctx := context.Background()
+	makeDeployment(t, env, "aapp")
+	cs := makeConfigSync(t, env, "async", "aapp", kohenv1alpha1.RolloutAuto)
+	key := client.ObjectKeyFromObject(cs)
+
+	// A foreign, un-owned ExternalSecret already exists with the same name.
+	foreign := &unstructured.Unstructured{}
+	foreign.SetGroupVersionKind(schema.GroupVersionKind{Group: "external-secrets.io", Version: "v1beta1", Kind: "ExternalSecret"})
+	foreign.SetName("db-es")
+	foreign.SetNamespace("default")
+	_ = unstructured.SetNestedField(foreign.Object, "vault", "spec", "secretStoreRef", "name")
+	if err := env.Client.Create(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := fixtureDir(t, map[string]string{
+		"app.yaml": "k: v\n",
+		"es.yaml":  esManifest("db-es", "db-secret", "vault", ""),
+	})
+	r := newReconcilerReal(env, &fakeFetcher{dir: dir, commit: "abcd1234abcd1234"}, config.Default())
+	reconcileN(t, r, key, 2)
+
+	cs = getCS(t, env, key)
+	if manifestsAppliedReason(cs) != kohenv1alpha1.ReasonManifestApplyFailed {
+		t.Errorf("reason = %q, want ManifestApplyFailed (no adoption)", manifestsAppliedReason(cs))
+	}
+	// The foreign object must be untouched (no ownership labels stamped).
+	got := getES(t, env, "db-es")
+	if got.GetLabels()[apply.ManagedByLabel] == apply.ManagedByValue {
+		t.Errorf("Kohen adopted a pre-existing ExternalSecret: %v", got.GetLabels())
+	}
+}
+
+// TestManifestMultipleApplied: several ExternalSecrets across files are all
+// applied and owned.
+func TestManifestMultipleApplied(t *testing.T) {
+	env := testenv.Start(t, "test/crds")
+	makeDeployment(t, env, "multapp")
+	cs := makeConfigSync(t, env, "multsync", "multapp", kohenv1alpha1.RolloutAuto)
+	key := client.ObjectKeyFromObject(cs)
+
+	multi := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n---\n" + esManifest("es-b", "sec-b", "vault", "")
+	dir := fixtureDir(t, map[string]string{
+		"app.yaml":     "k: v\n",
+		"a/es-a.yaml":  esManifest("es-a", "sec-a", "vault", ""),
+		"b/mixed.yaml": multi,
+	})
+	r := newReconcilerReal(env, &fakeFetcher{dir: dir, commit: "5678abcd5678abcd"}, config.Default())
+	reconcileN(t, r, key, 2)
+
+	getES(t, env, "es-a")
+	getES(t, env, "es-b")
+	cs = getCS(t, env, key)
+	if condStatus(cs, kohenv1alpha1.ConditionManifestsApplied) != metav1.ConditionTrue {
+		t.Errorf("ManifestsApplied should be True for multiple manifests: %+v", cs.Status.Conditions)
+	}
+}
+
 // TestESOJourneyFirstResolutionThenReady exercises UC3 at Tier 2: the committed
 // ExternalSecret is applied, first resolution fails closed until ESO reports
 // Ready and the target Secret exists, then the workload is wired + stamped.

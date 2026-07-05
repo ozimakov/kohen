@@ -42,17 +42,22 @@ func (r *ConfigSyncReconciler) applyManifests(ctx context.Context, cs *kohenv1al
 		return manifestOutcome{ok: false, terminal: true}
 	}
 
+	// Validate the whole set first (all-or-nothing): a guard violation on any
+	// manifest fails closed without partially applying its siblings.
 	guard := manifest.Guard{Namespace: cs.Namespace, StoreAllowList: r.storeAllowList()}
-	applied := make([]string, 0, len(objs))
 	for i := range objs {
-		u := objs[i].U
-		if gerr := guard.Check(u); gerr != nil {
+		if gerr := guard.Check(objs[i].U); gerr != nil {
 			reason := guardConditionReason(gerr)
 			msg := fmt.Sprintf("%s (%s)", gerr.Error(), objs[i].Source)
 			setCondition(cs, kohenv1alpha1.ConditionManifestsApplied, metav1.ConditionFalse, reason, r.redactMsg(msg))
 			r.event(cs, corev1.EventTypeWarning, reason, msg)
 			return manifestOutcome{ok: false, terminal: true}
 		}
+	}
+
+	applied := make([]string, 0, len(objs))
+	for i := range objs {
+		u := objs[i].U
 		// Namespace locality: default the (allowed) empty namespace to the
 		// ConfigSync's so the owned object is created in-namespace (R-AUTH.5).
 		if u.GetNamespace() == "" {
@@ -78,6 +83,7 @@ func (r *ConfigSyncReconciler) applyManifests(ctx context.Context, cs *kohenv1al
 		gvk := schema.GroupVersionKind{Group: manifest.ExternalSecretsGroup, Version: v, Kind: manifest.ExternalSecretKind + "List"}
 		if perr := r.Applier.PruneKind(ctx, cs, gvk, applied...); perr != nil {
 			setCondition(cs, kohenv1alpha1.ConditionManifestsApplied, metav1.ConditionFalse, kohenv1alpha1.ReasonManifestApplyFailed, r.redactMsg(perr.Error()))
+			r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonManifestApplyFailed, perr.Error())
 			return manifestOutcome{ok: false, terminal: false, err: perr}
 		}
 	}

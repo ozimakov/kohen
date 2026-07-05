@@ -182,7 +182,9 @@ func (a *Applier) PruneKind(ctx context.Context, owner client.Object, listGVK sc
 		return nil
 	}
 	// A server that does not serve this kind/version has nothing to prune.
-	if meta.IsNoMatchError(errors.Unwrap(err)) || apierrors.IsNotFound(errors.Unwrap(err)) {
+	// Both matchers walk the wrapped-error chain (apply.Error implements
+	// Unwrap), so the *apply.Error is passed through directly.
+	if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
 		return nil
 	}
 	return err

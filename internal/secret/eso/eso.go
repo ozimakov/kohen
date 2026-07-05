@@ -53,9 +53,15 @@ func New(reader client.Reader) *Resolver {
 // not-ready states (Reason set, nil error). Only unexpected API errors return
 // an error so the caller fails safe (R8.9).
 func (r *Resolver) Resolve(ctx context.Context, namespace string, ref secret.Ref) (secret.Resolution, error) {
-	es, err := r.getExternalSecret(ctx, namespace, ref.SecretName)
+	es, served, err := r.getExternalSecret(ctx, namespace, ref.SecretName)
 	if err != nil {
 		return secret.Resolution{}, err
+	}
+	if !served {
+		return secret.Resolution{
+			Reason:  kohenv1alpha1.ReasonBackendNotReady,
+			Message: fmt.Sprintf("External Secrets Operator CRD (%s/%s) is not served in this cluster", manifest.ExternalSecretsGroup, manifest.ExternalSecretKind),
+		}, nil
 	}
 	if es == nil {
 		return secret.Resolution{
@@ -100,33 +106,29 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, ref secret.Ref
 }
 
 // getExternalSecret fetches the ExternalSecret, trying each candidate API
-// version. It returns (nil, nil) when the object is absent (awaiting), and an
-// error only for unexpected API failures.
-func (r *Resolver) getExternalSecret(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	var lastErr error
+// version. served reports whether any candidate version is served by the
+// cluster (distinguishing "ESO not installed" from "manifest not yet present").
+// It returns (nil, true, nil) when the object is absent (awaiting) and an error
+// only for unexpected API failures.
+func (r *Resolver) getExternalSecret(ctx context.Context, namespace, name string) (u *unstructured.Unstructured, served bool, err error) {
 	for _, v := range candidateVersions {
-		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(schema.GroupVersionKind{
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
 			Group: manifest.ExternalSecretsGroup, Version: v, Kind: manifest.ExternalSecretKind,
 		})
-		err := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, u)
+		gerr := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, obj)
 		switch {
-		case err == nil:
-			return u, nil
-		case apierrors.IsNotFound(err):
-			return nil, nil // object absent under a served version: awaiting
-		case meta.IsNoMatchError(err):
-			lastErr = err // version not served: try the next
-			continue
+		case gerr == nil:
+			return obj, true, nil
+		case apierrors.IsNotFound(gerr):
+			return nil, true, nil // version served, object absent: awaiting
+		case meta.IsNoMatchError(gerr):
+			continue // version not served: try the next
 		default:
-			return nil, err
+			return nil, true, gerr
 		}
 	}
-	// No candidate version is served: treat as absent (nothing to await/read)
-	// rather than a hard error, so a cluster without ESO installed simply
-	// reports BackendNotReady via the nil return.
-	_ = lastErr
-	return nil, nil
+	return nil, false, nil // no candidate version served: ESO not installed
 }
 
 // esReady reports whether the ExternalSecret's status has a Ready=True condition.
@@ -157,14 +159,17 @@ func esTargetName(u *unstructured.Unstructured, fallback string) string {
 }
 
 // versionToken derives a metadata-only rotation token (R8.10): the
-// ExternalSecret's status.syncedResourceVersion when present, else the target
-// Secret's resourceVersion plus its key set. Never derived from values.
+// ExternalSecret's status.syncedResourceVersion when present, else falling back
+// to the target Secret's resourceVersion; the key set is always folded in.
+// Never derived from values. Using synced-revision-when-present avoids spurious
+// version churn from benign metadata writes that bump the Secret's rv.
 func versionToken(es *unstructured.Unstructured, secretRV string, keys []string) string {
-	synced, _, _ := unstructured.NestedString(es.Object, "status", "syncedResourceVersion")
+	rev, _, _ := unstructured.NestedString(es.Object, "status", "syncedResourceVersion")
+	if rev == "" {
+		rev = secretRV
+	}
 	h := sha256.New()
-	h.Write([]byte(synced))
-	h.Write([]byte{0})
-	h.Write([]byte(secretRV))
+	h.Write([]byte(rev))
 	h.Write([]byte{0})
 	h.Write([]byte(strings.Join(keys, ",")))
 	return hex.EncodeToString(h.Sum(nil))[:tokenLen]
