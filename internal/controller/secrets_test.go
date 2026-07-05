@@ -526,10 +526,19 @@ func TestSecretSurfaceEndToEndNative(t *testing.T) {
 		t.Errorf("env not wired end-to-end: %+v", main.Env)
 	}
 
-	// No secret value may appear in the workload or status (R8.3/TM9).
+	// No secret value may appear in the workload, status, or events (R8.3/TM9).
 	scan := leakcheck.New(value)
 	scan.AssertObjectClean(t, "deployment", d)
 	scan.AssertObjectClean(t, "configsync status", cs)
+	rec := r.Recorder.(*record.FakeRecorder)
+	for drain := true; drain; {
+		select {
+		case ev := <-rec.Events:
+			scan.AssertClean(t, "event", ev)
+		default:
+			drain = false
+		}
+	}
 }
 
 // TestSecretMissingKeyFailsClosedNative: the native resolver reports KeyMissing

@@ -179,6 +179,15 @@ func TestSecretRefsValidationRejected(t *testing.T) {
 				extRef("b", envSurface("TOKEN", "k2")),
 			}
 		}},
+		{"duplicate reference names", func(cs *kohenv1alpha1.ConfigSync) {
+			// name is the load-bearing identity (volume name, status key, token
+			// key); listType=map+listMapKey=name makes the API server reject
+			// duplicates (R8.12).
+			cs.Spec.SecretRefs = []kohenv1alpha1.SecretReference{
+				nativeRef("dup", fileSurface("/etc/a")),
+				extRef("dup", envSurface("TOKEN", "k")),
+			}
+		}},
 		{"file mount equals wiring mountPath", func(cs *kohenv1alpha1.ConfigSync) {
 			cs.Spec.Wiring.MountPath = "/etc/kohen/config"
 			cs.Spec.SecretRefs = []kohenv1alpha1.SecretReference{

@@ -360,6 +360,76 @@ func TestWireSecretSurfacePruneOnRemoval(t *testing.T) {
 	}
 }
 
+// TestWireSecretSurfaceCoexistsWithForeignListEntries verifies Kohen's
+// surface env/volumeMount/volume entries co-own the keyed lists alongside
+// another manager's entries, and that pruning Kohen's entries leaves the
+// foreign entries intact (R-WIRE.2 mergeable lists, R-WIRE.4 no force-take).
+func TestWireSecretSurfaceCoexistsWithForeignListEntries(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	// A workload where another manager owns an env var, a volume, and a mount.
+	d := deployment("coexist", corev1.Container{
+		Name:  "main",
+		Image: "nginx:1",
+		Env:   []corev1.EnvVar{{Name: "FOREIGN_ENV", Value: "keep-me"}},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "foreign-vol", MountPath: "/foreign"},
+		},
+	})
+	d.Spec.Template.Spec.Volumes = []corev1.Volume{
+		{Name: "foreign-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	d.TypeMeta = metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"}
+	if err := env.Client.Patch(ctx, d, client.Apply, client.FieldOwner("argocd"), client.ForceOwnership); err != nil {
+		t.Fatalf("simulated gitops apply: %v", err)
+	}
+
+	w := wire.New(env.Client)
+	full := wire.Spec{
+		Kind: "Deployment", Name: "coexist", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+		SecretFiles: []wire.SecretFile{{RefName: "tls", SecretName: "tls-secret", MountPath: "/etc/tls"}},
+		SecretEnv:   []wire.SecretEnv{{EnvVar: "DB_PASSWORD", SecretName: "db-secret", Key: "password"}},
+	}
+	if err := w.Wire(ctx, full); err != nil {
+		t.Fatalf("wire alongside foreign entries: %v", err)
+	}
+
+	got := getDeploy(t, env, "coexist")
+	main := findContainer(got, "main")
+	if findEnv(main, "FOREIGN_ENV") == nil || findEnv(main, "DB_PASSWORD") == nil {
+		t.Fatalf("foreign and kohen env should coexist: %+v", main.Env)
+	}
+	if findMount(main, "/foreign") == nil || findMount(main, "/etc/tls") == nil {
+		t.Fatalf("foreign and kohen mounts should coexist: %+v", main.VolumeMounts)
+	}
+	if !hasVolume(got, "foreign-vol") || !hasVolume(got, wire.SecretVolumeName("tls")) {
+		t.Fatalf("foreign and kohen volumes should coexist: %+v", got.Spec.Template.Spec.Volumes)
+	}
+
+	// Prune Kohen's secret surfaces; the foreign entries must survive.
+	if err := w.Wire(ctx, wire.Spec{
+		Kind: "Deployment", Name: "coexist", Namespace: "default",
+		MountPath: "/etc/kohen/config", ConfigMap: "c",
+	}); err != nil {
+		t.Fatalf("re-wire without surfaces: %v", err)
+	}
+	got = getDeploy(t, env, "coexist")
+	main = findContainer(got, "main")
+	if findEnv(main, "FOREIGN_ENV") == nil {
+		t.Errorf("prune retracted foreign env: %+v", main.Env)
+	}
+	if findEnv(main, "DB_PASSWORD") != nil {
+		t.Errorf("prune left kohen env: %+v", main.Env)
+	}
+	if findMount(main, "/foreign") == nil {
+		t.Errorf("prune retracted foreign mount: %+v", main.VolumeMounts)
+	}
+	if !hasVolume(got, "foreign-vol") {
+		t.Errorf("prune retracted foreign volume: %+v", got.Spec.Template.Spec.Volumes)
+	}
+}
+
 // TestWireCoexistsWithOtherManager verifies Kohen wires without disturbing
 // fields owned by a different SSA manager (GitOps coexistence, R-WIRE.4).
 func TestWireCoexistsWithOtherManager(t *testing.T) {

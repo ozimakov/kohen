@@ -530,25 +530,44 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // mapSecret maps a changed Secret back to the ConfigSync(s) that reference it,
-// so secret creation/rotation triggers a prompt reconcile rather than waiting
-// for the poll interval (SPEC §6.1, T10). It matches both native Secrets and
-// ESO target Secrets (which share the ExternalSecret's name by default).
+// so a rotation triggers a prompt reconcile rather than waiting for the poll
+// interval (SPEC §6.1, T10). It matches git-credential Secrets
+// (spec.source.authSecretRef) as well as backing secret references
+// (spec.secretRefs — native Secrets and ESO target Secrets, which share the
+// ExternalSecret's name by default).
+//
+// Note: the manager's Secret cache is deliberately restricted to
+// git-credential-labeled Secrets (main.go, TM8/T6), so this watch only fires
+// for those. Rotation of referenced native/ESO Secrets is detected on the poll
+// interval instead — Kohen never caches non-credential Secret material.
 func (r *ConfigSyncReconciler) mapSecret(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list kohenv1alpha1.ConfigSyncList
 	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
 		return nil
 	}
+	name := obj.GetName()
 	var reqs []reconcile.Request
 	for i := range list.Items {
 		cs := &list.Items[i]
-		for j := range cs.Spec.SecretRefs {
-			if cs.Spec.SecretRefs[j].SecretName() == obj.GetName() {
-				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cs)})
-				break
-			}
+		if references(cs, name) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cs)})
 		}
 	}
 	return reqs
+}
+
+// references reports whether cs points at a Secret named name via its git
+// credential or any of its secret references.
+func references(cs *kohenv1alpha1.ConfigSync, name string) bool {
+	if ref := cs.Spec.Source.AuthSecretRef; ref != nil && ref.Name == name {
+		return true
+	}
+	for j := range cs.Spec.SecretRefs {
+		if cs.Spec.SecretRefs[j].SecretName() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // mapWorkload maps a changed workload back to the ConfigSync(s) targeting it, so
