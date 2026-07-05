@@ -814,7 +814,13 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **NFR7 Documentation:** install (both RBAC scopes), Day-1 runbook, git auth,
   ESO integration, GitOps coexistence quickstart (with snippets, R-WIRE.5),
   troubleshooting (condition/reason catalog §11.4), kubectl operations
-  (§15), security hardening + threat model (§3.3, TM8).
+  (§15), security hardening + threat model (§3.3, TM8). The **README MUST carry
+  two usage sections kept current every phase**: a **Getting Started** with a
+  *minimal* configuration (fewest fields, maximum value out of the box, per §1.2
+  + defaults §11.2) and an **Advanced configuration reference** documenting
+  *every* shipped `ConfigSync`/operator field, credential key, annotation, and
+  status/condition. Each phase that adds or changes a user-visible field MUST
+  update both sections in the same change.
 - **NFR8 Licensing:** Apache-2.0, contribution guide, code of conduct.
 - **NFR9 Testing:** unit + integration (envtest, git fixture) + e2e (`kind`);
   leak tests on every PR touching reconcile/logging; abuse-case tests for
@@ -926,11 +932,14 @@ mode · sync history CR (`ConfigRelease`).
 
 ## 20. Relationship to the Existing Prototype
 
-The repository contains an early `kohen-agent` prototype (Go + `go-git`) that
-clones a repo into a directory via `--gitUrl`/`--gitPath`/`--targetDir` and
-matching env vars. It validates the git-fetch premise; its fetch logic maps to
-the operator's fetch/resolve step (S1.1 in PLAN). Its env-var interface is the
-seed for the deferred sidecar mode (§19).
+The repository previously contained an early `kohen-agent` prototype (Go +
+`go-git`) that cloned a repo into a directory via
+`--gitUrl`/`--gitPath`/`--targetDir` and matching env vars. It validated the
+git-fetch premise; its fetch logic maps to the operator's fetch/resolve step
+(S1.1 in PLAN) and its env-var interface is the seed for the deferred sidecar
+mode (§19). The prototype has now been removed (see git history) in favour of
+the clean-room operator implementation described in this SPEC and sequenced in
+PLAN.md; the git-source library (`internal/git`, S1.1) supersedes it.
 
 ---
 

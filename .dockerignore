@@ -1,0 +1,11 @@
+.git
+.github
+bin
+dist
+testbin
+coverage.out
+coverage.html
+*.test
+deploy
+docs
+*.md

@@ -28,7 +28,11 @@
 - **Every step ships tests.** No step is "done" without the test tier(s) listed
   in its entry passing in CI (see *Testing tiers*).
 - **Every step updates docs it touches** (CRD reference, flags, backend guide) so
-  documentation is never a separate catch-up effort (NFR7).
+  documentation is never a separate catch-up effort (NFR7). In particular, any
+  step that adds or changes a user-visible field MUST update the **README usage
+  sections** in the same PR: the **Getting Started** (minimal config, maximum
+  value out of the box) and the **Advanced configuration reference** (all shipped
+  features) — see SPEC NFR7.
 - **Interfaces over implementations.** Where a step produces a package other steps
   consume, it MUST define a small, stable Go interface and document it, so
   downstream agents can depend on the contract, not the internals.
@@ -47,7 +51,10 @@
 
 1. Code + tests merged; CI green (lint, unit, and any integration/e2e tiers the
    step declares).
-2. Public interfaces documented; SPEC/README/CRD docs updated as needed.
+2. Public interfaces documented; SPEC/README/CRD docs updated as needed —
+   including the README **Getting Started** (minimal config) and **Advanced
+   configuration reference** (all shipped features) when user-visible fields
+   change (NFR7).
 3. No secret material in logs/events/status/artifacts (SPEC R8.3) where relevant.
 4. Backward-compatible with already-merged steps, or the break is called out and
    the affected steps' entries updated.
@@ -485,8 +492,10 @@ Delivers UC2/UC3 with the two v1 backends (ESO primary, native `Secret`).
   coexistence quickstart** with tested snippets (R-WIRE.5); **troubleshooting**
   — the §11.4 symptom → condition/reason → action table; **kubectl operations**
   (§15: status, force-sync, pin/rollback); multi-workload pattern (one
-  `ConfigSync` per workload, R-SINGLETON); README refresh (§2.4 decision table
-  prominent).
+  `ConfigSync` per workload, R-SINGLETON); **README refresh** — §2.4 decision
+  table prominent, plus the **Getting Started** (minimal config) and **Advanced
+  configuration reference** (all shipped features) sections finalized to the v1.0
+  surface (NFR7).
 - **Deliverables:** `docs/` tree; README.
 - **Testing:** Runbook steps executed literally against kind (can reuse U1/U2
   jobs); docs CI (links, SPEC refs).

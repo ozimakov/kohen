@@ -1,0 +1,85 @@
+# Tier 3 end-to-end suite (PLAN U1): a real kind cluster with a kubelet, the
+# operator installed via Helm, an in-cluster git server, and the config-only
+# user journeys asserted end to end. Kept in its own workflow so it gates the U1
+# milestone independently of the fast unit/integration CI.
+name: E2E (kind)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: U1 config sync & rollout
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: kohen
+          version: v0.24.0
+          node_image: kindest/node:v1.31.0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Build images
+        run: |
+          docker build -t kohen:e2e -f Dockerfile .
+          docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image kohen:e2e --name kohen
+          kind load docker-image kohen-e2e-gitserver:e2e --name kohen
+
+      - name: Install Kohen via Helm
+        run: |
+          helm install kohen deploy/helm/kohen \
+            --namespace kohen-system --create-namespace \
+            --set image.repository=kohen \
+            --set image.tag=e2e \
+            --set image.pullPolicy=Never \
+            --set operatorConfig.allowInsecureGitTLS=true \
+            --wait --timeout 4m
+
+      - name: Run U1 e2e suite
+        env:
+          GITSERVER_IMAGE: kohen-e2e-gitserver:e2e
+        run: make e2e
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== operator logs ==="
+          kubectl logs -n kohen-system deploy/kohen --tail=300 || true
+          echo "=== configsyncs (all namespaces) ==="
+          kubectl get configsync -A -o yaml || true
+          # Each test owns a kohen-e2e-* namespace; dump them all.
+          for ns in $(kubectl get ns -o name | grep -oE 'kohen-e2e[^ ]*' || true); do
+            echo "=== namespace ${ns} ==="
+            kubectl get all,cm -n "${ns}" -o wide || true
+            for gs in $(kubectl get deploy -n "${ns}" -o name | grep gitserver || true); do
+              echo "--- ${gs} logs (current) ---"
+              kubectl logs -n "${ns}" "${gs}" --tail=100 || true
+              echo "--- ${gs} logs (previous) ---"
+              kubectl logs -n "${ns}" "${gs}" --tail=100 --previous || true
+            done
+            kubectl describe deploy -n "${ns}" || true
+          done

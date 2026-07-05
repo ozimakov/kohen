@@ -1,0 +1,71 @@
+# Deployment scope (SPEC §16):
+#   cluster    - watch all namespaces; installs a ClusterRole/ClusterRoleBinding.
+#   namespaced - watch only the release namespace; installs a Role/RoleBinding.
+scope: cluster
+
+image:
+  repository: ghcr.io/ozimakov/kohen
+  # tag defaults to .Chart.appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+leaderElection:
+  # Recommended on for HA; safe to leave on with replicaCount: 1.
+  enabled: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Operator-scoped configuration rendered into a ConfigMap (SPEC §12).
+operatorConfig:
+  sourceAllowList: []
+  secretStoreAllowList: []
+  maxDegradedDuration: 15m
+  allowInsecureGitTLS: false
+
+metrics:
+  service:
+    enabled: true
+    port: 8080
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Hardened by default (SPEC R-AUTH.*, non-root, read-only rootfs).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+
+# Extra volumes/mounts if needed (e.g. CA bundles).
+extraVolumes: []
+extraVolumeMounts: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

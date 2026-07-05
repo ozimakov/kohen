@@ -1,0 +1,35 @@
+# golangci-lint configuration for Kohen. See PLAN.md S0.1.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - revive
+    - unconvert
+    - bodyclose
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/ozimakov/kohen
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+
+issues:
+  exclude-rules:
+    # Test files may be a little more relaxed.
+    - path: _test\.go
+      linters:
+        - errcheck
+  max-issues-per-linter: 0
+  max-same-issues: 0
