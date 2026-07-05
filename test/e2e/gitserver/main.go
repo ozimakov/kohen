@@ -11,6 +11,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -60,6 +61,12 @@ func main() {
 		},
 	}
 
+	// Optional HTTP basic auth on the git (CGI) paths only, so the e2e can
+	// exercise private-repo auth success/failure. /admin and /healthz stay open
+	// (admin is only reached via an in-test port-forward).
+	authUser := os.Getenv("AUTH_USER")
+	authPass := os.Getenv("AUTH_PASS")
+
 	mux := http.NewServeMux()
 	// Admin: commit a config change. POST /admin/commit?path=app.yaml with the
 	// new file content as the body; returns the new commit SHA.
@@ -82,7 +89,12 @@ func main() {
 		fmt.Fprintln(w, sha)
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
-	mux.Handle("/", cgiHandler)
+	var gitHandler http.Handler = cgiHandler
+	if authUser != "" || authPass != "" {
+		gitHandler = requireBasicAuth(authUser, authPass, cgiHandler)
+		log.Printf("basic auth required for git paths (user=%s)", authUser)
+	}
+	mux.Handle("/", gitHandler)
 
 	cert, err := selfSignedCert()
 	if err != nil {
@@ -96,6 +108,24 @@ func main() {
 	}
 	log.Printf("gitserver serving %s over HTTPS on %s (repo path /%s/.git)", repoDir, *addr, *repo)
 	log.Fatal(srv.ListenAndServeTLS("", ""))
+}
+
+// requireBasicAuth wraps next with HTTP basic auth using the given credentials.
+func requireBasicAuth(user, pass string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if !ok || !subtleEqual(u, user) || !subtleEqual(p, pass) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="kohen-e2e"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// subtleEqual compares two strings in constant time.
+func subtleEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func gitHTTPBackend() (string, error) {
