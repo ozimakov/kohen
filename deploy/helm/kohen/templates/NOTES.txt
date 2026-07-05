@@ -1,0 +1,26 @@
+Kohen operator installed as {{ include "kohen.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Scope: {{ .Values.scope }}
+{{- if eq .Values.scope "namespaced" }}
+The operator watches ONLY namespace {{ .Release.Namespace }} (WATCH_NAMESPACE).
+{{- else }}
+The operator watches ALL namespaces (cluster scope).
+{{- end }}
+
+Create a ConfigSync to keep a workload in sync with a git path:
+
+  apiVersion: kohen.dev/v1alpha1
+  kind: ConfigSync
+  metadata:
+    name: app
+    namespace: {{ .Release.Namespace }}
+  spec:
+    source:
+      url: https://github.com/acme/config.git
+    path: services/app/prod
+    workloadRef:
+      kind: Deployment
+      name: app
+
+Check status:
+  kubectl get configsync -n {{ .Release.Namespace }}

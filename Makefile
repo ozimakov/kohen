@@ -42,8 +42,11 @@ generate: $(CONTROLLER_GEN) ## Generate deepcopy code.
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 
 .PHONY: manifests
-manifests: $(CONTROLLER_GEN) ## Generate CRD manifests.
+manifests: $(CONTROLLER_GEN) ## Generate CRD manifests + RBAC role and sync CRD into the Helm chart.
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=kohen-manager-role paths=./internal/controller/... output:rbac:artifacts:config=config/rbac
+	mkdir -p deploy/helm/kohen/crds
+	cp config/crd/bases/*.yaml deploy/helm/kohen/crds/
 
 $(CONTROLLER_GEN):
 	GOBIN=$(GOBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)

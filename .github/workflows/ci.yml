@@ -51,6 +51,21 @@ jobs:
       - name: Fail if generated files are stale
         run: git diff --exit-code
 
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint deploy/helm/kohen
+      - name: helm template (cluster scope)
+        run: helm template kohen deploy/helm/kohen --include-crds > /dev/null
+      - name: helm template (namespaced scope)
+        run: helm template kohen deploy/helm/kohen --include-crds --set scope=namespaced > /dev/null
+
   test:
     name: Build & Test
     runs-on: ubuntu-latest
