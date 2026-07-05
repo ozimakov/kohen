@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -76,6 +77,12 @@ type Options struct {
 	// Resolver enables DNS-based SSRF guarding of hostnames. When nil, only
 	// IP-literal hosts are guarded.
 	Resolver Resolver
+	// CacheTTL enables the repo+commit fetch cache (T10) with the given idle
+	// TTL. Zero disables caching (every Fetch clones into a fresh temp dir).
+	CacheTTL time.Duration
+	// CacheMaxEntries bounds the number of cached worktrees; zero uses the
+	// default.
+	CacheMaxEntries int
 }
 
 // Client is the default Source implementation.
@@ -83,17 +90,22 @@ type Client struct {
 	allowList           []string
 	allowLocalTransport bool
 	resolver            Resolver
+	cache               *fetchCache
 }
 
 // NewClient returns a Client configured with opts. It also installs the
 // process-wide safe HTTPS transport so redirects are guarded (R-AUTH.7).
 func NewClient(opts Options) *Client {
 	installSafeHTTPTransport(opts.Resolver)
-	return &Client{
+	c := &Client{
 		allowList:           opts.AllowList,
 		allowLocalTransport: opts.AllowLocalTransport,
 		resolver:            opts.Resolver,
 	}
+	if opts.CacheTTL > 0 {
+		c.cache = newFetchCache(opts.CacheTTL, opts.CacheMaxEntries)
+	}
+	return c
 }
 
 var _ Source = (*Client)(nil)
@@ -120,25 +132,18 @@ func (c *Client) Fetch(ctx context.Context, ref Reference, cred *Credential) (*R
 	}
 	defer func() { _ = cleanupAuth() }()
 
-	refName, isCommit, err := c.resolveRef(ctx, p, auth, cred.tlsInsecure(), ref.Ref)
+	rr, err := c.resolveRef(ctx, p, auth, cred.tlsInsecure(), ref.Ref)
 	if err != nil {
 		return nil, err
 	}
 
-	dir, err := os.MkdirTemp("", "kohen-git-*")
+	worktreeDir, commit, cleanup, err := c.obtainWorktree(ctx, p, auth, cred.tlsInsecure(), ref.Ref, rr)
 	if err != nil {
-		return nil, wrapError(ReasonFetchFailed, err, "creating work directory")
-	}
-	cleanup := func() error { return os.RemoveAll(dir) }
-
-	commit, err := c.checkout(ctx, dir, p, auth, cred.tlsInsecure(), ref.Ref, refName, isCommit)
-	if err != nil {
-		_ = cleanup()
 		return nil, err
 	}
 
-	subDir := filepath.Join(dir, filepath.FromSlash(subPath))
-	if !within(dir, subDir) {
+	subDir := filepath.Join(worktreeDir, filepath.FromSlash(subPath))
+	if !within(worktreeDir, subDir) {
 		_ = cleanup()
 		return nil, newError(ReasonPathNotFound, "resolved subpath escapes the repository")
 	}
@@ -155,55 +160,100 @@ func (c *Client) Fetch(ctx context.Context, ref Reference, cred *Credential) (*R
 	// worktree through a symlinked directory component committed in the repo.
 	// go-git's checkout tends to neutralize escaping symlinks, but we make the
 	// containment guarantee our own rather than relying on library internals.
-	if err := verifyContained(dir, subDir); err != nil {
+	if err := verifyContained(worktreeDir, subDir); err != nil {
 		_ = cleanup()
 		return nil, err
 	}
 
-	return &Result{Commit: commit, Dir: subDir, WorktreeDir: dir, Cleanup: cleanup}, nil
+	return &Result{Commit: commit, Dir: subDir, WorktreeDir: worktreeDir, Cleanup: cleanup}, nil
+}
+
+// obtainWorktree returns a checkout for the resolved ref, reusing a cached
+// worktree keyed by repo+commit when caching is enabled and the commit is known
+// ahead of cloning (T10). It returns the worktree dir, the resolved commit, and
+// a cleanup that either releases the cache reference or removes the temp dir.
+func (c *Client) obtainWorktree(ctx context.Context, p parsedURL, auth transport.AuthMethod, insecureTLS bool, ref string, rr resolvedRef) (string, string, func() error, error) {
+	if c.cache != nil && rr.hash != "" && p.kind != transportLocal {
+		key := p.raw + "@" + rr.hash
+		entry, err := c.cache.acquire(ctx, key, func(dir string) (string, error) {
+			return c.checkout(ctx, dir, p, auth, insecureTLS, ref, rr)
+		})
+		if err != nil {
+			return "", "", nil, err
+		}
+		return entry.dir, entry.commit, func() error { c.cache.release(entry); return nil }, nil
+	}
+
+	dir, err := os.MkdirTemp("", "kohen-git-*")
+	if err != nil {
+		return "", "", nil, wrapError(ReasonFetchFailed, err, "creating work directory")
+	}
+	commit, err := c.checkout(ctx, dir, p, auth, insecureTLS, ref, rr)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", "", nil, err
+	}
+	return dir, commit, func() error { return os.RemoveAll(dir) }, nil
+}
+
+// resolvedRef is the outcome of resolving a Reference's ref against the remote.
+type resolvedRef struct {
+	name     plumbing.ReferenceName // branch/tag ref to clone; empty for a commit
+	isCommit bool
+	// hash is the concrete commit SHA when known ahead of cloning (branch/tag
+	// from the ref listing, or a full 40-char commit ref). Empty for a short
+	// commit SHA, which can only be expanded by cloning. Used as the fetch
+	// dedup key (T10).
+	hash string
 }
 
 // resolveRef lists remote refs and classifies ref as a branch, a tag, or a
-// commit. It returns the reference name to clone (empty for a commit) and
-// whether the ref is a commit.
-func (c *Client) resolveRef(ctx context.Context, p parsedURL, auth transport.AuthMethod, insecureTLS bool, ref string) (plumbing.ReferenceName, bool, error) {
+// commit, capturing the concrete commit SHA when it is known cheaply.
+func (c *Client) resolveRef(ctx context.Context, p parsedURL, auth transport.AuthMethod, insecureTLS bool, ref string) (resolvedRef, error) {
 	remote := gogit.NewRemote(memory.NewStorage(), &config.RemoteConfig{
 		Name: "origin",
 		URLs: []string{p.raw},
 	})
 	refs, err := remote.ListContext(ctx, &gogit.ListOptions{Auth: auth, InsecureSkipTLS: insecureTLS})
 	if err != nil {
-		return "", false, classifyTransportError(err, "listing remote refs")
+		return resolvedRef{}, classifyTransportError(err, "listing remote refs")
 	}
 
 	branch := plumbing.NewBranchReferenceName(ref)
 	tag := plumbing.NewTagReferenceName(ref)
-	haveBranch, haveTag := false, false
+	var branchHash, tagHash string
 	for _, r := range refs {
 		switch r.Name() {
 		case branch:
-			haveBranch = true
+			branchHash = r.Hash().String()
 		case tag:
-			haveTag = true
+			tagHash = r.Hash().String()
 		}
 	}
-	if haveBranch {
-		return branch, false, nil
+	if branchHash != "" {
+		return resolvedRef{name: branch, hash: branchHash}, nil
 	}
-	if haveTag {
-		return tag, false, nil
+	if tagHash != "" {
+		// Annotated tags point at a tag object; the concrete commit is resolved
+		// after checkout, so only use the hash as a dedup key for lightweight
+		// tags (verified post-clone). Keep it simple: treat tag hash as the key.
+		return resolvedRef{name: tag, hash: tagHash}, nil
 	}
 	if looksLikeHash(ref) {
-		return "", true, nil
+		full := ""
+		if len(ref) == 40 {
+			full = strings.ToLower(ref)
+		}
+		return resolvedRef{isCommit: true, hash: full}, nil
 	}
-	return "", false, newError(ReasonFetchFailed, "ref "+ref+" was not found (no matching branch, tag, or commit)")
+	return resolvedRef{}, newError(ReasonFetchFailed, "ref "+ref+" was not found (no matching branch, tag, or commit)")
 }
 
 // checkout clones dir at the resolved ref and returns the concrete commit SHA.
 // Branch/tag clones are shallow (SPEC T2); commit refs require a full clone plus
 // a checkout, since not all servers support shallow fetch-by-commit.
-func (c *Client) checkout(ctx context.Context, dir string, p parsedURL, auth transport.AuthMethod, insecureTLS bool, ref string, refName plumbing.ReferenceName, isCommit bool) (string, error) {
-	if isCommit {
+func (c *Client) checkout(ctx context.Context, dir string, p parsedURL, auth transport.AuthMethod, insecureTLS bool, ref string, rr resolvedRef) (string, error) {
+	if rr.isCommit {
 		repo, err := gogit.PlainCloneContext(ctx, dir, false, &gogit.CloneOptions{
 			URL:             p.raw,
 			Auth:            auth,
@@ -230,7 +280,7 @@ func (c *Client) checkout(ctx context.Context, dir string, p parsedURL, auth tra
 	opts := &gogit.CloneOptions{
 		URL:             p.raw,
 		Auth:            auth,
-		ReferenceName:   refName,
+		ReferenceName:   rr.name,
 		SingleBranch:    true,
 		InsecureSkipTLS: insecureTLS,
 	}

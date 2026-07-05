@@ -453,6 +453,8 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Fetcher = git.NewClient(git.Options{
 			AllowList: r.Config.SourceAllowList,
 			Resolver:  net.DefaultResolver,
+			// Dedup clones by repo+commit across syncs and poll cycles (T10).
+			CacheTTL: git.DefaultFetchCacheTTL,
 		})
 	}
 	return ctrl.NewControllerManagedBy(mgr).
