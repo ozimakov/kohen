@@ -21,10 +21,8 @@ import (
 
 // Env is a running test control plane.
 type Env struct {
-	Cfg       *rest.Config
-	Client    client.Client
-	env       *envtest.Environment
-	stoppedFn func()
+	Cfg    *rest.Config
+	Client client.Client
 }
 
 // Start boots an envtest control plane with the Kohen CRDs installed and returns
@@ -58,13 +56,12 @@ func Start(t *testing.T) *Env {
 		t.Fatalf("creating client: %v", err)
 	}
 
-	env := &Env{Cfg: cfg, Client: cl, env: e}
 	t.Cleanup(func() {
 		if err := e.Stop(); err != nil {
 			t.Logf("stopping envtest: %v", err)
 		}
 	})
-	return env
+	return &Env{Cfg: cfg, Client: cl}
 }
 
 // repoRoot walks up from the working directory to the module root (the directory
