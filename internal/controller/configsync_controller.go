@@ -66,6 +66,8 @@ type ConfigSyncReconciler struct {
 // Reconcile runs the ConfigSync pipeline.
 func (r *ConfigSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	start := time.Now()
+	defer func() { metrics.ReconcileDuration.Observe(time.Since(start).Seconds()) }()
 
 	var cs kohenv1alpha1.ConfigSync
 	if err := r.Get(ctx, req.NamespacedName, &cs); err != nil {
@@ -136,11 +138,13 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	}
 
 	// Fetch (never prune on failure — keep last-good).
+	fetchStart := time.Now()
 	res, err := r.Fetcher.Fetch(ctx, git.Reference{
 		URL:  cs.Spec.Source.URL,
 		Ref:  cs.Spec.Source.Ref,
 		Path: cs.Spec.Path,
 	}, cred)
+	metrics.FetchDuration.Observe(time.Since(fetchStart).Seconds())
 	if err != nil {
 		reason := gitConditionReason(err)
 		metrics.FetchErrors.WithLabelValues(reason).Inc()
@@ -190,6 +194,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	// Version and workload wiring / stamping.
 	version := rollout.Version(res.Commit)
 	cs.Status.ConfigVersion = version
+	metrics.SetConfigVersion(cs.Namespace, cs.Name, version)
 	rolloutComplete := r.wireAndStamp(ctx, cs, cmName, version)
 
 	// Overall readiness.
@@ -347,8 +352,8 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Drop the per-object degraded gauge so deleted syncs don't leak a series.
-	metrics.Degraded.DeleteLabelValues(cs.Namespace, cs.Name)
+	// Drop per-object metric series so deleted syncs don't leak time series.
+	metrics.ClearConfigSync(cs.Namespace, cs.Name)
 	controllerutil.RemoveFinalizer(cs, FinalizerName)
 	if err := r.Update(ctx, cs); err != nil {
 		return ctrl.Result{}, err
