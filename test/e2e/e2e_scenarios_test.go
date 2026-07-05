@@ -86,9 +86,11 @@ func TestU1RolloutNone(t *testing.T) {
 		}
 		return nil
 	})
-	// Settle initial wiring before capturing the baseline generation, so the
-	// churn check below reflects only the config change (mirrors the Tier-2 test).
-	gen := waitStableGeneration(t, c, ns, "app", 8*time.Second, 60*time.Second)
+	// Settle initial wiring, then record the ReplicaSet count. "No rollout" is
+	// most faithfully "no new ReplicaSet is created" — a generation bump from a
+	// non-pod-template field would not roll pods, so we assert on ReplicaSets.
+	waitStableGeneration(t, c, ns, "app", 8*time.Second, 60*time.Second)
+	rsBefore := replicaSetCount(t, c, ns, "app")
 
 	// Commit a change ⇒ ConfigMap updates, object version advances, NO rollout.
 	commitFile(t, ns, "gitserver", 18444, "svc/app.yaml", "greeting: hello-v2\n")
@@ -117,11 +119,34 @@ func TestU1RolloutNone(t *testing.T) {
 		if s := d.Spec.Template.Annotations[configSHAAnnotation]; s != "" {
 			return fmt.Errorf("pod template got stamped in none mode: %q", s)
 		}
-		if d.Generation != gen {
-			return fmt.Errorf("generation churned (rollout happened): %d -> %d", gen, d.Generation)
+		if got := replicaSetCount(t, c, ns, "app"); got != rsBefore {
+			return fmt.Errorf("a rollout happened in none mode: replicasets %d -> %d", rsBefore, got)
 		}
 		return nil
 	})
+}
+
+// replicaSetCount returns the number of ReplicaSets owned by the named Deployment
+// (a new ReplicaSet is the ground-truth signal that a rollout occurred).
+func replicaSetCount(t *testing.T, c client.Client, ns, deployment string) int {
+	t.Helper()
+	d := &appsv1.Deployment{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: deployment}, d); err != nil {
+		t.Fatalf("get deploy %s: %v", deployment, err)
+	}
+	var list appsv1.ReplicaSetList
+	if err := c.List(context.Background(), &list, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list replicasets: %v", err)
+	}
+	n := 0
+	for i := range list.Items {
+		for _, owner := range list.Items[i].OwnerReferences {
+			if owner.UID == d.UID {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // TestU1Rollback is scenario 5 (UC6): pinning spec.source.ref to a prior commit
