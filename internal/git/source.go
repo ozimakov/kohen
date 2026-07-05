@@ -149,6 +149,15 @@ func (c *Client) Fetch(ctx context.Context, ref Reference, cred *Credential) (*R
 		return nil, wrapError(ReasonFetchFailed, statErr, "accessing subpath %q", subPath)
 	}
 
+	// Defense in depth (SPEC R7.5 / TM6): ensure the subpath does not escape the
+	// worktree through a symlinked directory component committed in the repo.
+	// go-git's checkout tends to neutralize escaping symlinks, but we make the
+	// containment guarantee our own rather than relying on library internals.
+	if err := verifyContained(dir, subDir); err != nil {
+		_ = cleanup()
+		return nil, err
+	}
+
 	return &Result{Commit: commit, Dir: subDir, WorktreeDir: dir, Cleanup: cleanup}, nil
 }
 
@@ -280,6 +289,24 @@ func sanitizePath(p string) (string, error) {
 		return "", newError(ReasonPathNotFound, "path "+p+" escapes the repository")
 	}
 	return clean, nil
+}
+
+// verifyContained resolves all symlinks in both paths and confirms the subpath
+// still lies within the worktree. It fails closed on any resolution error.
+func verifyContained(worktree, subDir string) error {
+	resolvedRoot, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		return wrapError(ReasonFetchFailed, err, "resolving worktree")
+	}
+	resolvedSub, err := filepath.EvalSymlinks(subDir)
+	if err != nil {
+		return wrapError(ReasonPathNotFound, err, "resolving subpath")
+	}
+	if !within(resolvedRoot, resolvedSub) {
+		return newError(ReasonPathNotFound,
+			"subpath resolves outside the repository (symlink escape rejected)")
+	}
+	return nil
 }
 
 // within reports whether target is base or lies beneath it.

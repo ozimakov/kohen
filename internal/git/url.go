@@ -50,7 +50,7 @@ func parseURL(raw string, allowLocal bool) (parsedURL, error) {
 	if strings.Contains(trimmed, "://") {
 		u, err := url.Parse(trimmed)
 		if err != nil {
-			return parsedURL{}, wrapError(ReasonSourceNotAllowed, err, "invalid source url %q", raw)
+			return parsedURL{}, wrapError(ReasonSourceNotAllowed, err, "invalid source url %q", redact(raw))
 		}
 		scheme := strings.ToLower(u.Scheme)
 		if scheme == "file" {
@@ -65,7 +65,7 @@ func parseURL(raw string, allowLocal bool) (parsedURL, error) {
 				fmt.Sprintf("scheme %q is not allowed (only https and ssh are permitted)", scheme))
 		}
 		if u.Hostname() == "" {
-			return parsedURL{}, newError(ReasonSourceNotAllowed, fmt.Sprintf("source url %q has no host", raw))
+			return parsedURL{}, newError(ReasonSourceNotAllowed, fmt.Sprintf("source url %q has no host", redact(raw)))
 		}
 		return parsedURL{raw: trimmed, kind: kind, host: u.Hostname()}, nil
 	}
@@ -80,7 +80,18 @@ func parseURL(raw string, allowLocal bool) (parsedURL, error) {
 		return parsedURL{raw: trimmed, kind: transportLocal}, nil
 	}
 	return parsedURL{}, newError(ReasonSourceNotAllowed,
-		fmt.Sprintf("source url %q has no supported scheme (use https:// or ssh://)", raw))
+		fmt.Sprintf("source url %q has no supported scheme (use https:// or ssh://)", redact(raw)))
+}
+
+// redact removes any inline userinfo (user:password@) from a URL so credentials
+// never leak into error messages, status, or events (SPEC R8.3 / TM9).
+func redact(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = url.User("redacted")
+	return u.String()
 }
 
 // scpHost extracts the host from scp-like syntax ("git@github.com:org/repo.git").
@@ -192,5 +203,5 @@ func (c *Client) checkAllowList(p parsedURL) error {
 		}
 	}
 	return newError(ReasonSourceNotAllowed,
-		fmt.Sprintf("source url %q is not permitted by the operator source allow-list", p.raw))
+		fmt.Sprintf("source url %q is not permitted by the operator source allow-list", redact(p.raw)))
 }
