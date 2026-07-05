@@ -7,8 +7,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/gitserver ./test/e2e/gitserver
 
 FROM alpine:3.20
-# git provides git-http-backend at /usr/libexec/git-core/.
-RUN apk add --no-cache git
+# git-http-backend lives in the git-daemon subpackage on Alpine (not the base
+# git package); without it the server log.Fatalf's at startup.
+RUN apk add --no-cache git git-daemon
 COPY --from=build /out/gitserver /usr/local/bin/gitserver
 RUN mkdir -p /srv/git && adduser -D -u 65532 kohen && chown -R kohen /srv/git
 USER 65532

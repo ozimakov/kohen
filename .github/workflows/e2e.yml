@@ -69,6 +69,12 @@ jobs:
         run: |
           echo "=== operator logs ==="
           kubectl logs -n kohen-system deploy/kohen --tail=300 || true
+          echo "=== gitserver logs (current) ==="
+          kubectl logs -n kohen-e2e deploy/gitserver --tail=200 || true
+          echo "=== gitserver logs (previous) ==="
+          kubectl logs -n kohen-e2e deploy/gitserver --tail=200 --previous || true
+          echo "=== pods (wide) ==="
+          kubectl get pods -n kohen-e2e -o wide || true
           echo "=== configsyncs ==="
           kubectl get configsync -A -o yaml || true
           echo "=== e2e namespace ==="
