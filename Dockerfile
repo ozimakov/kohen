@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Build the operator binary.
 FROM golang:1.23 AS build
 WORKDIR /src

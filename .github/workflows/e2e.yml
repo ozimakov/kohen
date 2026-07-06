@@ -41,8 +41,9 @@ jobs:
 
       - name: Build images
         run: |
-          docker build -t kohen:e2e -f Dockerfile .
-          docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
+          chmod +x scripts/ci-docker-retry.sh
+          scripts/ci-docker-retry.sh docker build -t kohen:e2e -f Dockerfile .
+          scripts/ci-docker-retry.sh docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
 
       - name: Load images into kind
         run: |
@@ -108,8 +109,9 @@ jobs:
 
       - name: Build images
         run: |
-          docker build -t kohen:e2e -f Dockerfile .
-          docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
+          chmod +x scripts/ci-docker-retry.sh
+          scripts/ci-docker-retry.sh docker build -t kohen:e2e -f Dockerfile .
+          scripts/ci-docker-retry.sh docker build -t kohen-e2e-gitserver:e2e -f test/e2e/gitserver/Dockerfile .
 
       - name: Load images into kind
         run: |

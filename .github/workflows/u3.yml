@@ -49,9 +49,10 @@ jobs:
 
       - name: Build images
         run: |
-          docker build -t "$IMG" -f Dockerfile .
-          docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
-          docker pull busybox:1.36
+          chmod +x scripts/ci-docker-retry.sh
+          scripts/ci-docker-retry.sh docker build -t "$IMG" -f Dockerfile .
+          scripts/ci-docker-retry.sh docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
+          scripts/ci-docker-retry.sh docker pull busybox:1.36
           kind load docker-image "$IMG" --name kohen
           kind load docker-image "$GITSERVER_IMG" --name kohen
           kind load docker-image busybox:1.36 --name kohen
@@ -133,8 +134,9 @@ jobs:
 
       - name: Build & load image
         run: |
-          docker build -t "$IMG" -f Dockerfile .
-          docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
+          chmod +x scripts/ci-docker-retry.sh
+          scripts/ci-docker-retry.sh docker build -t "$IMG" -f Dockerfile .
+          scripts/ci-docker-retry.sh docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
           kind load docker-image "$IMG" --name kohen-ns
           kind load docker-image "$GITSERVER_IMG" --name kohen-ns
 
@@ -178,8 +180,9 @@ jobs:
 
       - name: Build & load image
         run: |
-          docker build -t "$IMG" -f Dockerfile .
-          docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
+          chmod +x scripts/ci-docker-retry.sh
+          scripts/ci-docker-retry.sh docker build -t "$IMG" -f Dockerfile .
+          scripts/ci-docker-retry.sh docker build -t "$GITSERVER_IMG" -f test/e2e/gitserver/Dockerfile .
           kind load docker-image "$IMG" --name kohen-uninstall
           kind load docker-image "$GITSERVER_IMG" --name kohen-uninstall
 
