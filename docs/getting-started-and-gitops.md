@@ -350,7 +350,7 @@ and check events with `kubectl -n <ns> describe configsync <name>`.
 | `WorkloadNotFound` | `WorkloadWired=False` | The `workloadRef` target does not exist in the namespace. Create it or fix the ref. |
 | `UnsupportedStrategy` | `WorkloadWired=False` | `rollout: auto` requires a rolling strategy; `OnDelete` StatefulSet / `Recreate` Deployment is unsupported for auto rollout. Switch strategy or use `rollout: none`. |
 | `ApplyConflict` | `WorkloadWired=False` | Another manager owns a field Kohen needs. Apply the [GitOps ignore rules](#gitops-coexistence). |
-| `SingletonViolation` | `Ready=False` | More than one `ConfigSync` targets the same workload; only one may. Delete the duplicate. |
+| `SingletonViolation` | `WorkloadWired=False` | More than one `ConfigSync` targets the same workload; only one may. Delete the duplicate. |
 | `MaxDegradedExceeded` | `Ready=False` | Degraded longer than `operatorConfig.maxDegradedDuration`. Investigate the underlying `Fetched`/`Rendered` failure. |
 
 The workload always stays healthy during source outages: Kohen retains the

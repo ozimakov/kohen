@@ -9,6 +9,10 @@ const (
 	ConditionFetched = "Fetched"
 	// ConditionRendered reports that config rendered within limits.
 	ConditionRendered = "Rendered"
+	// ConditionManifestsApplied reports the apply-if-present engine result:
+	// recognized secret manifests (ExternalSecret) committed to git are applied
+	// (owned + pruned) subject to the guard rails (SPEC §8.2, R8.8, R-AUTH.4).
+	ConditionManifestsApplied = "ManifestsApplied"
 	// ConditionSecretsReady reports that all references resolved (R8.9).
 	ConditionSecretsReady = "SecretsReady"
 	// ConditionWorkloadWired reports SSA merge of owned fields.
@@ -37,13 +41,25 @@ const (
 	ReasonInvalidKey          = "InvalidKey"
 	ReasonKeyConflict         = "KeyConflict"
 
-	// SecretsReady reasons (Phase 2).
+	// SecretsReady reasons (Phase 2). §11.4 lists these as example reasons;
+	// InvalidSurface is a Kohen extension for a surface whose declared `as`
+	// mode does not match its fields (CEL cannot reference the reserved `as`
+	// field, so the reconciler validates it — R11.1).
 	ReasonSecretNotFound          = "SecretNotFound"
 	ReasonKeyMissing              = "KeyMissing"
 	ReasonAwaitingFirstResolution = "AwaitingFirstResolution"
 	ReasonBackendNotReady         = "BackendNotReady"
 	ReasonDegradedServingLastGood = "DegradedServingLastGood"
 	ReasonMaxDegradedExceeded     = "MaxDegradedExceeded"
+	ReasonInvalidSurface          = "InvalidSurface"
+
+	// ManifestsApplied reasons (Phase 2, S2.4). Guard-rail rejections fail
+	// closed (R-AUTH.4/R-AUTH.5); ManifestApplyFailed is a transient apply error.
+	ReasonManifestKindNotAllowed     = "ManifestKindNotAllowed"
+	ReasonManifestNamespaceViolation = "ManifestNamespaceViolation"
+	ReasonStoreNotAllowed            = "StoreNotAllowed"
+	ReasonManifestInvalid            = "ManifestInvalid"
+	ReasonManifestApplyFailed        = "ManifestApplyFailed"
 
 	// WorkloadWired reasons.
 	ReasonWorkloadNotFound    = "WorkloadNotFound"

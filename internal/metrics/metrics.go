@@ -69,6 +69,22 @@ var (
 		Name: "kohen_configsync_config_version_info",
 		Help: "Applied config version per ConfigSync (value is always 1).",
 	}, []string{"namespace", "name", "version"})
+
+	// SecretResolveErrors counts secret-resolution not-ready states by reason
+	// (§11.4 SecretsReady). Label cardinality is bounded to reason names — never
+	// secret names or values (R8.3).
+	SecretResolveErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kohen_secret_resolve_errors_total",
+		Help: "Secret resolution not-ready outcomes by reason.",
+	}, []string{"reason"})
+
+	// MaxDegradedExceededTotal counts occurrences of a ConfigSync serving
+	// last-good secrets beyond maxDegradedDuration — a security-visible signal
+	// (SPEC R8.11).
+	MaxDegradedExceededTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kohen_secret_max_degraded_exceeded_total",
+		Help: "Times a ConfigSync exceeded maxDegradedDuration serving last-good secrets.",
+	})
 )
 
 func init() {
@@ -82,6 +98,8 @@ func init() {
 		ReconcileDuration,
 		FetchDuration,
 		ConfigVersionInfo,
+		SecretResolveErrors,
+		MaxDegradedExceededTotal,
 	)
 }
 

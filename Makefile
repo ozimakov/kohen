@@ -91,8 +91,12 @@ kind-load: ## Load the built images into the kind cluster.
 	kind load docker-image $(GITSERVER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: e2e
-e2e: ## Run the U1 e2e suite (requires a kind cluster with Kohen installed and images loaded).
-	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 20m -v ./test/e2e/...
+e2e: ## Run the U1 config e2e suite (requires a kind cluster with Kohen installed and images loaded).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 20m -v -run '^TestU1' ./test/e2e/...
+
+.PHONY: e2e-secrets
+e2e-secrets: ## Run the U2 secret-integration e2e suite (requires kind + Kohen + ESO installed; see .github/workflows/e2e.yml).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 25m -v -run '^TestU2' ./test/e2e/...
 
 .PHONY: vet
 vet: ## Run go vet.

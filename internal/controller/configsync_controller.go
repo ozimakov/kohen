@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,10 +28,14 @@ import (
 	"github.com/ozimakov/kohen/internal/apply"
 	"github.com/ozimakov/kohen/internal/config"
 	"github.com/ozimakov/kohen/internal/git"
+	"github.com/ozimakov/kohen/internal/manifest"
 	"github.com/ozimakov/kohen/internal/metrics"
 	"github.com/ozimakov/kohen/internal/redact"
 	"github.com/ozimakov/kohen/internal/render"
 	"github.com/ozimakov/kohen/internal/rollout"
+	"github.com/ozimakov/kohen/internal/secret"
+	"github.com/ozimakov/kohen/internal/secret/eso"
+	"github.com/ozimakov/kohen/internal/secret/native"
 	"github.com/ozimakov/kohen/internal/wire"
 )
 
@@ -53,6 +58,11 @@ type ConfigSyncReconciler struct {
 	Wirer    *wire.Wirer
 	Redactor *redact.Redactor
 	Config   *config.Config
+
+	// Resolvers maps a secret backend to its resolver (SPEC §8, S2.2+). Native
+	// and ESO resolvers are registered in SetupWithManager; tests may inject a
+	// fake.
+	Resolvers map[secret.Backend]secret.Resolver
 }
 
 // +kubebuilder:rbac:groups=kohen.dev,resources=configsyncs,verbs=get;list;watch;create;update;patch;delete
@@ -61,6 +71,7 @@ type ConfigSyncReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;patch
 
 // Reconcile runs the ConfigSync pipeline.
@@ -191,11 +202,51 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 		return ctrl.Result{}, err
 	}
 
-	// Version and workload wiring / stamping.
-	version := rollout.Version(res.Commit)
+	// Apply-if-present secret manifests (ExternalSecrets) from git, owned +
+	// pruned and subject to the guard rails (§8.2, R8.8, R-AUTH.4). This
+	// precedes resolution so the ESO backend can observe applied objects; a
+	// guard-rail violation fails closed.
+	if out := r.applyManifests(ctx, cs, res.Dir); !out.ok {
+		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "secret manifest apply failed, serving last-good")
+		if out.terminal {
+			return steady, nil // terminal until the user fixes the manifest/guard violation
+		}
+		return ctrl.Result{}, out.err
+	}
+
+	// Resolve secret references (§8). Secrets gate advancing to the new config
+	// version: fail closed on first resolution, fail safe on a transient
+	// backend outage with a prior good version (R8.9), bounded by
+	// maxDegradedDuration (R8.11).
+	now := time.Now()
+	priorSecretsReason := conditionReason(cs, kohenv1alpha1.ConditionSecretsReady)
+	decision := r.resolveSecrets(ctx, cs, now)
+	if !decision.AllReady {
+		if decision.MaxDegradedExceeded && priorSecretsReason != kohenv1alpha1.ReasonMaxDegradedExceeded {
+			// Fire the security-visible signal once, on entry to the state
+			// (R8.11), not on every requeue while it persists.
+			metrics.MaxDegradedExceededTotal.Inc()
+			r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonMaxDegradedExceeded, decision.Message)
+		}
+		// Keep last-good: do not wire secret surfaces or stamp the new version.
+		r.setReady(cs, metav1.ConditionFalse, decision.ReadyReason, r.redactMsg(decision.Message))
+		return ctrl.Result{RequeueAfter: progressingRequeue}, nil
+	}
+
+	// Version and workload wiring / stamping. Env-surfaced secret tokens fold
+	// into the config version so their rotation triggers a rollout (R-CONS,
+	// R8.5); file-surfaced rotation does not.
+	version := rollout.VersionWithSecrets(res.Commit, decision.EnvTokens)
 	cs.Status.ConfigVersion = version
 	metrics.SetConfigVersion(cs.Namespace, cs.Name, version)
 	rolloutComplete := r.wireAndStamp(ctx, cs, cmName, version)
+
+	// Only once the workload is actually wired for this version do the resolved
+	// references count as established (R8.9): a resolution that never reached
+	// the workload must still fail closed on a later outage.
+	if workloadWired(cs) {
+		markSecretsEstablished(cs)
+	}
 
 	// Overall readiness.
 	r.computeReady(cs)
@@ -228,11 +279,14 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	if mountPath == "" {
 		mountPath = "/etc/kohen/config"
 	}
+	files, envs := secretSurfaces(cs)
 	spec := wire.Spec{
 		Kind: kind, Name: name, Namespace: ns,
-		Container: cs.Spec.Wiring.Container,
-		MountPath: mountPath,
-		ConfigMap: cmName,
+		Container:   cs.Spec.Wiring.Container,
+		MountPath:   mountPath,
+		ConfigMap:   cmName,
+		SecretFiles: files,
+		SecretEnv:   envs,
 	}
 	if cs.Spec.Rollout != kohenv1alpha1.RolloutNone {
 		spec.ConfigSHA = version // auto: stamp the pod template (triggers rollout)
@@ -352,6 +406,15 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Prune this sync's applied secret manifests (ExternalSecrets), across the
+	// candidate API versions (R8.8, R-WIRE.6). ESO deletes the target Secret it
+	// created when the ExternalSecret is removed.
+	for _, v := range externalSecretPruneVersions {
+		gvk := schema.GroupVersionKind{Group: manifest.ExternalSecretsGroup, Version: v, Kind: manifest.ExternalSecretKind + "List"}
+		if err := r.Applier.PruneKind(ctx, cs, gvk); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	// Drop per-object metric series so deleted syncs don't leak time series.
 	metrics.ClearConfigSync(cs.Namespace, cs.Name)
 	controllerutil.RemoveFinalizer(cs, FinalizerName)
@@ -395,6 +458,8 @@ func (r *ConfigSyncReconciler) computeReady(cs *kohenv1alpha1.ConfigSync) {
 	for _, t := range []string{
 		kohenv1alpha1.ConditionFetched,
 		kohenv1alpha1.ConditionRendered,
+		kohenv1alpha1.ConditionManifestsApplied,
+		kohenv1alpha1.ConditionSecretsReady,
 		kohenv1alpha1.ConditionWorkloadWired,
 	} {
 		if !conditionTrue(cs, t) {
@@ -432,6 +497,14 @@ func workloadWired(cs *kohenv1alpha1.ConfigSync) bool {
 	return conditionTrue(cs, kohenv1alpha1.ConditionWorkloadWired)
 }
 
+// conditionReason returns the reason of a condition, or "" if absent.
+func conditionReason(cs *kohenv1alpha1.ConfigSync, condType string) string {
+	if c := findCondition(cs, condType); c != nil {
+		return c.Reason
+	}
+	return ""
+}
+
 // SetupWithManager wires defaults and registers the reconciler.
 func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Scheme == nil {
@@ -452,6 +525,18 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Renderer == nil {
 		r.Renderer = render.New(render.Options{})
 	}
+	if r.Resolvers == nil {
+		// Register both v1 backends: native Secret (S2.3) and ESO ExternalSecret
+		// (S2.4). An unregistered backend resolves to BackendNotReady, failing
+		// closed rather than silently wiring nothing. Resolvers read via the
+		// uncached API reader so arbitrary referenced objects can be read on
+		// demand without caching all Secret material (TM8, T6).
+		reader := mgr.GetAPIReader()
+		r.Resolvers = map[secret.Backend]secret.Resolver{
+			secret.BackendNativeSecret:   native.New(reader),
+			secret.BackendExternalSecret: eso.New(reader),
+		}
+	}
 	if r.Fetcher == nil {
 		// Wire a real resolver so hostname-based SSRF is guarded, not only
 		// IP-literal hosts (R-AUTH.7 / TM5).
@@ -467,8 +552,50 @@ func (r *ConfigSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("Deployment"))).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.mapWorkload("StatefulSet"))).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecret)).
 		Named("configsync").
 		Complete(r)
+}
+
+// mapSecret maps a changed Secret back to the ConfigSync(s) that reference it,
+// so a rotation triggers a prompt reconcile rather than waiting for the poll
+// interval (SPEC §6.1, T10). It matches git-credential Secrets
+// (spec.source.authSecretRef) as well as backing secret references
+// (spec.secretRefs — native Secrets and ESO target Secrets, which share the
+// ExternalSecret's name by default).
+//
+// Note: the manager's Secret cache is deliberately restricted to
+// git-credential-labeled Secrets (main.go, TM8/T6), so this watch only fires
+// for those. Rotation of referenced native/ESO Secrets is detected on the poll
+// interval instead — Kohen never caches non-credential Secret material.
+func (r *ConfigSyncReconciler) mapSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list kohenv1alpha1.ConfigSyncList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	name := obj.GetName()
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		cs := &list.Items[i]
+		if references(cs, name) {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cs)})
+		}
+	}
+	return reqs
+}
+
+// references reports whether cs points at a Secret named name via its git
+// credential or any of its secret references.
+func references(cs *kohenv1alpha1.ConfigSync, name string) bool {
+	if ref := cs.Spec.Source.AuthSecretRef; ref != nil && ref.Name == name {
+		return true
+	}
+	for j := range cs.Spec.SecretRefs {
+		if cs.Spec.SecretRefs[j].SecretName() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // mapWorkload maps a changed workload back to the ConfigSync(s) targeting it, so

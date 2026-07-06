@@ -24,10 +24,14 @@ whenever the config changes — version-matched across the fleet.
   — the verified, copy-pasteable walkthrough (install → sync → rollout → auth →
   rollback → cleanup → Argo CD / Flux coexistence), exercised end-to-end in CI on
   `kind` (see [`test/e2e`](./test/e2e)).
+- [Secret integration guide (ESO + native)](./docs/secrets.md) — reference
+  ESO-backed and native `Secret`s from a `ConfigSync`, safely; readiness,
+  rotation, guard rails, and the Vault-via-ESO decision tree.
 
-> **Status:** Phase 1 (config-only) is implemented. Secret resolution/surfacing
-> (`spec.secretRefs`) lands in Phase 2; those fields are reserved in the API
-> today and documented as *(Phase 2)* below.
+> **Status:** Phase 1 (config-only) and Phase 2 (secret integration) are
+> implemented. `spec.secretRefs` supports the two v1 backends — `externalSecret`
+> (External Secrets Operator) and `nativeSecret` — surfaced as files or env vars
+> (see the [secret integration guide](./docs/secrets.md)).
 
 ---
 
@@ -115,8 +119,7 @@ behavior, troubleshooting, and GitOps coexistence — follow the
 
 ## Advanced configuration reference
 
-Every feature currently shipped. Fields marked *(Phase 2)* are reserved in the
-API but not yet acted upon.
+Every feature currently shipped.
 
 ### `ConfigSync` spec
 
@@ -133,11 +136,36 @@ API but not yet acted upon.
 | `wiring.mountPath` | string | `/etc/kohen/config` | Mount path for the config volume. Never uses `subPath` (so live updates work). |
 | `rollout` | `auto` \| `none` | `auto` | See [rollout modes](#rollout-modes). |
 | `sync.interval` | duration | `30s` | Polling interval between reconciles. |
-| `secretRefs[]` | list | — | *(Phase 2)* Secrets the config references (ESO / native). Reserved. |
+| `secretRefs[]` | list | — | Secrets the config references, surfaced as files or env vars. See [secret references](#secret-references). |
 
 The rendered file tree maps to `ConfigMap` keys; `/` in a nested file name maps
 to `__` in the key. Rendering fails closed if the result exceeds the ~1 MiB
 `ConfigMap` limit (`Rendered=False/Oversize`).
+
+### Secret references
+
+`spec.secretRefs[]` lets a workload consume secrets alongside its config. Two
+backends are supported: `externalSecret` (an External Secrets Operator
+`ExternalSecret`, applied from git and awaited) and `nativeSecret` (a
+pre-existing `Secret`). Each is surfaced as a `file` (mounted volume, live
+in-place updates) or `env` (a `valueFrom.secretKeyRef` entry, rotation rolls the
+workload). Kohen never reads the secret value; the readiness policy fails closed
+on first resolution and fails safe (last-good) on a transient outage. See the
+full [secret integration guide](./docs/secrets.md) for schema, rotation, guard
+rails, and the Vault-via-ESO decision tree.
+
+```yaml
+spec:
+  secretRefs:
+    - name: db                # native Secret, as an env var
+      backend: nativeSecret
+      nativeSecret: { name: checkout-db }
+      surface: { as: env, envVar: DB_PASSWORD, key: password }
+    - name: api               # ESO ExternalSecret (committed to git), as a file
+      backend: externalSecret
+      externalSecret: { name: checkout-api }
+      surface: { as: file, mountPath: /etc/checkout/api }
+```
 
 ### Rollout modes
 
@@ -176,7 +204,7 @@ Install-time values (see [`deploy/helm/kohen/values.yaml`](./deploy/helm/kohen/v
 | `image.repository` / `image.tag` | `ghcr.io/ozimakov/kohen` / chart appVersion | Operator image. |
 | `replicaCount` / `leaderElection.enabled` | `1` / `true` | HA-safe defaults. |
 | `operatorConfig.sourceAllowList` | `[]` (all allowed) | Restrict git hosts / URL prefixes usable as sources (`R-AUTH.3`). Recommended in production. |
-| `operatorConfig.secretStoreAllowList` | `[]` | *(Phase 2)* Allowed secret stores. |
+| `operatorConfig.secretStoreAllowList` | `[]` (no restriction) | Names of secret stores an applied `ExternalSecret` may reference (`R-AUTH.4`). Recommended in production. See the [secret guide](./docs/secrets.md#7-guard-rails-operatorplatform-team). |
 | `operatorConfig.maxDegradedDuration` | `15m` | How long to serve last-good before surfacing `MaxDegradedExceeded`. |
 | `operatorConfig.allowInsecureGitTLS` | `false` | Permit per-source `insecure-skip-tls-verify` / `insecure-ignore-host-key`. Keep `false` in production. |
 | `metrics.service.enabled` / `.port` | `true` / `8080` | Prometheus metrics endpoint. |
@@ -198,9 +226,10 @@ unspecified, or multicast addresses, and re-screens every HTTP redirect hop
 ### Status & conditions
 
 `status` exposes `sourceCommit`, `configVersion`, `workloadVersion`,
-`rolloutInProgress`, and per-step conditions: `Fetched`, `Rendered`,
-`WorkloadWired`, `RolloutComplete`, and the overall `Ready`. Common failure
-reasons and the first action to take:
+`rolloutInProgress`, per-reference `secretRefs`, and per-step conditions:
+`Fetched`, `Rendered`, `ManifestsApplied`, `SecretsReady`, `WorkloadWired`,
+`RolloutComplete`, and the overall `Ready`. Common failure reasons and the first
+action to take:
 
 | Reason | Condition | First action |
 | --- | --- | --- |
@@ -210,11 +239,14 @@ reasons and the first action to take:
 | `PathNotFound` | `Fetched=False` | Correct `spec.path` for the ref. |
 | `Oversize` | `Rendered=False` | Reduce/split config (~1 MiB `ConfigMap` limit). |
 | `TreeSafetyViolation` / `InvalidKey` / `KeyConflict` | `Rendered=False` | Remove unsafe files / fix file names/collisions. |
+| `StoreNotAllowed` / `ManifestKindNotAllowed` / `ManifestNamespaceViolation` | `ManifestsApplied=False` | Fix the committed `ExternalSecret` or the store allow-list (see the [secret guide](./docs/secrets.md#9-troubleshooting)). |
+| `AwaitingFirstResolution` | `SecretsReady=False` | A never-wired secret isn't resolvable yet; no rollout until it resolves. Create the `Secret` / make the `ExternalSecret` Ready. |
+| `DegradedServingLastGood` | `SecretsReady=False` | An established secret went transiently not-ready; workload keeps running last-good and auto-recovers. |
 | `WorkloadNotFound` | `WorkloadWired=False` | Create the target workload or fix `workloadRef`. |
 | `UnsupportedStrategy` | `WorkloadWired=False` | Use a rolling strategy, or `rollout: none`. |
 | `ApplyConflict` | `WorkloadWired=False` | Apply the [GitOps ignore rules](#gitops-coexistence). |
-| `SingletonViolation` | `Ready=False` | Only one `ConfigSync` may target a workload; remove the duplicate. |
-| `MaxDegradedExceeded` | `Ready=False` | Investigate the underlying `Fetched`/`Rendered` failure. |
+| `SingletonViolation` | `WorkloadWired=False` | Only one `ConfigSync` may target a workload; remove the duplicate. |
+| `MaxDegradedExceeded` | `SecretsReady=False` | Degraded past `maxDegradedDuration`; investigate the underlying `SecretsReady` failure. |
 
 ### GitOps coexistence
 
