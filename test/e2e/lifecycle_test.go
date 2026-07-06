@@ -92,7 +92,7 @@ func TestU3OperatorUpgrade(t *testing.T) {
 		"upgrade", helmReleaseName(), helmChartPath(),
 		"--namespace", operatorNamespace(),
 		"--reuse-values",
-		"--set", fmt.Sprintf("podAnnotations.kohen\\.dev/upgraded-at=%d", time.Now().Unix()),
+		"--set-string", fmt.Sprintf("podAnnotations.kohen\\.dev/upgraded-at=%d", time.Now().Unix()),
 		"--wait", "--timeout", "4m",
 	}
 	if img := os.Getenv("KOHEN_IMAGE"); img != "" {
