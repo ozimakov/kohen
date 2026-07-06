@@ -753,6 +753,70 @@ func TestU2AbuseCases(t *testing.T) {
 			metav1.ConditionFalse, kohenv1alpha1.ReasonSourceNotAllowed, 90*time.Second)
 	})
 
+	t.Run("manifest_kind_not_allowed", func(t *testing.T) {
+		ctx := context.Background()
+		ns := "kohen-e2e-abuse-kind"
+		setupNamespace(t, c, ns)
+		deployGitServer(t, c, ns, "gitserver", nil)
+		deployDeployment(t, c, ns, "app")
+		createCredentialSecret(t, c, ns, "git-creds", insecureTLSSecret())
+		commitFile(t, ns, "gitserver", 18452, "abuse/rogue-secret.yaml", `apiVersion: v1
+kind: Secret
+metadata:
+  name: rogue
+type: Opaque
+stringData:
+  k: v
+`)
+		commitFile(t, ns, "gitserver", 18452, "abuse/app.yaml", "greeting: hi\n")
+
+		cs := newSecretSync("abuse-kind-sync", ns, "abuse", "app", kohenv1alpha1.RolloutAuto)
+		if err := c.Create(ctx, cs); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Delete(ctx, cs) })
+		key := client.ObjectKeyFromObject(cs)
+		waitConditionReason(t, c, key, kohenv1alpha1.ConditionManifestsApplied,
+			metav1.ConditionFalse, kohenv1alpha1.ReasonManifestKindNotAllowed, 90*time.Second)
+	})
+
+	t.Run("manifest_namespace_violation", func(t *testing.T) {
+		requireESO(t, c)
+		ctx := context.Background()
+		ns := "kohen-e2e-abuse-ns"
+		setupNamespace(t, c, ns)
+		deployGitServer(t, c, ns, "gitserver", nil)
+		deployDeployment(t, c, ns, "app")
+		createCredentialSecret(t, c, ns, "git-creds", insecureTLSSecret())
+		commitFile(t, ns, "gitserver", 18453, "abuse/external-secret.yaml", fmt.Sprintf(`apiVersion: %s/%s
+kind: ExternalSecret
+metadata:
+  name: foreign-es
+  namespace: other-ns
+spec:
+  refreshInterval: 3s
+  secretStoreRef:
+    name: %s
+    kind: SecretStore
+  target:
+    name: foreign-es
+  data:
+    - secretKey: k
+      remoteRef:
+        key: /x
+`, esoGroup, esoVersion, fakeStore))
+		commitFile(t, ns, "gitserver", 18453, "abuse/app.yaml", "greeting: hi\n")
+
+		cs := newSecretSync("abuse-ns-sync", ns, "abuse", "app", kohenv1alpha1.RolloutAuto)
+		if err := c.Create(ctx, cs); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Delete(ctx, cs) })
+		key := client.ObjectKeyFromObject(cs)
+		waitConditionReason(t, c, key, kohenv1alpha1.ConditionManifestsApplied,
+			metav1.ConditionFalse, kohenv1alpha1.ReasonManifestNamespaceViolation, 90*time.Second)
+	})
+
 	t.Run("singleton_violation", func(t *testing.T) {
 		ctx := context.Background()
 		ns := "kohen-e2e-abuse-singleton"

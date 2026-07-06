@@ -21,7 +21,7 @@ unit and integration tests live next to the code they cover.
     the SSRF/allow-list guards. Tests skip when `git`/`git-http-backend` is
     unavailable.
 - **Tier 3 — E2E / Usability (`kind`).** A real cluster with kubelet and
-  controllers. See [`test/e2e`](./e2e) and the `U1` milestone.
+  controllers. See [`test/e2e`](./e2e) and milestones U1, U2, U3.
 
 ## Fixtures & helpers
 
@@ -30,7 +30,18 @@ unit and integration tests live next to the code they cover.
 | [`internal/testenv`](../internal/testenv) | envtest control-plane bootstrap (Tier 2) | controller maintainers |
 | [`internal/git/httpfixture_test.go`](../internal/git/httpfixture_test.go) | smart-HTTP git-server fixture (Tier 2) | git-source maintainers |
 | [`test/leakcheck`](./leakcheck) | secret-leak assertion helper (R8.3/TM9) | security owners |
-| [`test/e2e`](./e2e) | kind-based end-to-end scenarios (Tier 3, U1) | e2e maintainers |
+| [`test/e2e`](./e2e) | kind-based end-to-end scenarios (Tier 3, U1–U3) | e2e maintainers |
+
+### E2E entry points
+
+| Make target | Suite |
+| --- | --- |
+| `make e2e` | U1 config sync & rollout |
+| `make e2e-secrets` | U2 secret integration (requires ESO) |
+| `make e2e-security` | S3.1 pod/RBAC conformance (A9) |
+| `make e2e-acceptance` | U3 mount-content + matrix (A2) |
+| `make e2e-lifecycle` | S3.3 upgrade (A12); set `KOHEN_ALLOW_UNINSTALL=true` for uninstall |
+| `make e2e-u3` | Full U3 gate (all of the above) |
 
 ### Secret-leak assertions (R8.3 / TM9)
 
