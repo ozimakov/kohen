@@ -23,8 +23,8 @@ import (
 	kohenv1alpha1 "github.com/ozimakov/kohen/api/v1alpha1"
 )
 
-// busyboxImage is small, has /bin/cat, and is cached on kind nodes.
-const busyboxImage = "registry.k8s.io/e2e-test-images/busybox:1.29-4"
+// busyboxImage has /bin/cat. Pre-loaded into kind in the U3 workflow (see u3.yml).
+const busyboxImage = "busybox:1.36"
 
 func deployBusyboxDeployment(t *testing.T, c client.Client, ns, name string) {
 	t.Helper()
@@ -38,9 +38,16 @@ func deployBusyboxDeployment(t *testing.T, c client.Client, ns, name string) {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
-					Name:    "app",
-					Image:   busyboxImage,
-					Command: []string{"sh", "-c", "sleep infinity"},
+					Name:            "app",
+					Image:           busyboxImage,
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Command:         []string{"sh", "-c", "sleep infinity"},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"true"}},
+						},
+						PeriodSeconds: 2,
+					},
 				}}},
 			},
 		},
@@ -48,6 +55,7 @@ func deployBusyboxDeployment(t *testing.T, c client.Client, ns, name string) {
 	if err := c.Create(context.Background(), d); err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatalf("create deployment %s: %v", name, err)
 	}
+	waitDeployReady(t, c, ns, name, 180*time.Second)
 }
 
 func podExecCat(t *testing.T, ns, deployName, path string) string {
@@ -62,7 +70,8 @@ func podExecCat(t *testing.T, ns, deployName, path string) string {
 
 // TestU3MountedVolumeContent is A2: after a git commit updates the ConfigMap,
 // a running pod observes the new file content via the kubelet atomic mount
-// (non-subPath).
+// (non-subPath). Uses rollout:none so the pod is not restarted — the mount
+// update alone is what we assert.
 func TestU3MountedVolumeContent(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(t)
@@ -82,7 +91,7 @@ func TestU3MountedVolumeContent(t *testing.T) {
 			},
 			Path:        "svc",
 			WorkloadRef: kohenv1alpha1.WorkloadReference{Kind: "Deployment", Name: "demo"},
-			Rollout:     kohenv1alpha1.RolloutAuto,
+			Rollout:     kohenv1alpha1.RolloutNone,
 			Sync:        kohenv1alpha1.SyncSpec{Interval: metav1.Duration{Duration: 5 * time.Second}},
 		},
 	}
@@ -91,11 +100,10 @@ func TestU3MountedVolumeContent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Delete(ctx, cs) })
 	key := client.ObjectKeyFromObject(cs)
-	configSyncReady(t, c, key, 180*time.Second)
-	waitDeployReady(t, c, ns, "demo", 120*time.Second)
+	configSyncReady(t, c, key, 300*time.Second)
 
 	mountPath := "/etc/kohen/config/app.yaml"
-	eventually(t, 90*time.Second, "v1 visible in pod", func() error {
+	eventually(t, 120*time.Second, "v1 visible in pod mount", func() error {
 		got := podExecCat(t, ns, "demo", mountPath)
 		if !strings.Contains(got, "hello-v1") {
 			return fmt.Errorf("mount content = %q", got)
@@ -104,7 +112,7 @@ func TestU3MountedVolumeContent(t *testing.T) {
 	})
 
 	commitFile(t, ns, "gitserver", 18480, "svc/app.yaml", "greeting: hello-mount-v2\n")
-	eventually(t, 120*time.Second, "configmap v2", func() error {
+	eventually(t, 180*time.Second, "v2 visible in pod via kubelet mount update", func() error {
 		cm := &corev1.ConfigMap{}
 		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "demo-config"}, cm); err != nil {
 			return err
@@ -112,18 +120,21 @@ func TestU3MountedVolumeContent(t *testing.T) {
 		if cm.Data["app.yaml"] != "greeting: hello-mount-v2\n" {
 			return fmt.Errorf("cm data = %q", cm.Data["app.yaml"])
 		}
-		return nil
-	})
-
-	// Wait for rollout to complete with the new stamp, then read the mount.
-	eventually(t, 180*time.Second, "v2 visible in pod after rollout", func() error {
-		waitDeployReady(t, c, ns, "demo", 30*time.Second)
 		got := podExecCat(t, ns, "demo", mountPath)
 		if !strings.Contains(got, "hello-mount-v2") {
 			return fmt.Errorf("mount still old: %q", got)
 		}
 		return nil
 	})
+
+	// Sanity: status reflects the new config version without a rolling restart.
+	got := &kohenv1alpha1.ConfigSync{}
+	if err := c.Get(ctx, key, got); err != nil {
+		t.Fatalf("get configsync: %v", err)
+	}
+	if got.Status.ConfigVersion == "" {
+		t.Fatalf("expected config version in status, got %+v", got.Status)
+	}
 }
 
 // TestU3AcceptanceMatrix is a lightweight registry test that documents which
