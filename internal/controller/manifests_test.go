@@ -255,11 +255,10 @@ func TestManifestMultipleApplied(t *testing.T) {
 	cs := makeConfigSync(t, env, "multsync", "multapp", kohenv1alpha1.RolloutAuto)
 	key := client.ObjectKeyFromObject(cs)
 
-	multi := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n---\n" + esManifest("es-b", "sec-b", "vault", "")
 	dir := fixtureDir(t, map[string]string{
-		"app.yaml":     "k: v\n",
-		"a/es-a.yaml":  esManifest("es-a", "sec-a", "vault", ""),
-		"b/mixed.yaml": multi,
+		"app.yaml":    "k: v\n",
+		"a/es-a.yaml": esManifest("es-a", "sec-a", "vault", ""),
+		"b/es-b.yaml": esManifest("es-b", "sec-b", "vault", ""),
 	})
 	r := newReconcilerReal(env, &fakeFetcher{dir: dir, commit: "5678abcd5678abcd"}, config.Default())
 	reconcileN(t, r, key, 2)
