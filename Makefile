@@ -122,7 +122,7 @@ e2e-acceptance: ## Run U3 acceptance additions (A2 matrix doc + mount content).
 
 .PHONY: e2e-lifecycle
 e2e-lifecycle: ## Run A12 upgrade test (set KOHEN_ALLOW_UNINSTALL=true for uninstall).
-	GITSERVER_IMAGE=$(GITSERVER_IMG) KOHEN_IMAGE=$(IMG) $(GO) test -tags e2e -count=1 -timeout 20m -v -run '^TestU3Operator' ./test/e2e/...
+	GITSERVER_IMAGE=$(GITSERVER_IMG) KOHEN_IMAGE=$(IMG) KOHEN_CHART_PATH=$(CURDIR)/deploy/helm/kohen $(GO) test -tags e2e -count=1 -timeout 20m -v -run '^TestU3Operator' ./test/e2e/...
 
 .PHONY: e2e-u3
 e2e-u3: ## Run the full U3 acceptance gate (U1 + U2 + security + acceptance + upgrade).

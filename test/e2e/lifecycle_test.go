@@ -27,11 +27,23 @@ func helmChartPath() string {
 	if v := os.Getenv("KOHEN_CHART_PATH"); v != "" {
 		return v
 	}
-	wd, err := os.Getwd()
+	// go test may chdir into the package directory; walk up to find Chart.yaml.
+	dir, err := os.Getwd()
 	if err != nil {
-		return "./deploy/helm/kohen"
+		return "deploy/helm/kohen"
 	}
-	return filepath.Join(wd, "deploy", "helm", "kohen")
+	for i := 0; i < 4; i++ {
+		candidate := filepath.Join(dir, "deploy", "helm", "kohen")
+		if _, err := os.Stat(filepath.Join(candidate, "Chart.yaml")); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Join("deploy", "helm", "kohen")
 }
 
 func installMethod() string {
