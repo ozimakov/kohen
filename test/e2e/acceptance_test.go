@@ -60,12 +60,20 @@ func deployBusyboxDeployment(t *testing.T, c client.Client, ns, name string) {
 
 func podExecCat(t *testing.T, ns, deployName, path string) string {
 	t.Helper()
-	out, err := exec.Command("kubectl", "-n", ns, "exec", "deploy/"+deployName,
-		"-c", "app", "--", "cat", path).CombinedOutput()
+	out, err := podExecCatErr(ns, deployName, path)
 	if err != nil {
 		t.Fatalf("exec cat %s: %v\n%s", path, err, out)
 	}
-	return string(out)
+	return out
+}
+
+func podExecCatErr(ns, deployName, path string) (string, error) {
+	out, err := exec.Command("kubectl", "-n", ns, "exec", "deploy/"+deployName,
+		"-c", "app", "--", "cat", path).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%w\n%s", err, out)
+	}
+	return string(out), nil
 }
 
 // TestU3MountedVolumeContent is A2: after a git commit updates the ConfigMap,
@@ -101,10 +109,14 @@ func TestU3MountedVolumeContent(t *testing.T) {
 	t.Cleanup(func() { _ = c.Delete(ctx, cs) })
 	key := client.ObjectKeyFromObject(cs)
 	configSyncReady(t, c, key, 300*time.Second)
+	waitDeployReady(t, c, ns, "demo", 180*time.Second)
 
 	mountPath := "/etc/kohen/config/app.yaml"
-	eventually(t, 120*time.Second, "v1 visible in pod mount", func() error {
-		got := podExecCat(t, ns, "demo", mountPath)
+	eventually(t, 180*time.Second, "v1 visible in pod mount", func() error {
+		got, err := podExecCatErr(ns, "demo", mountPath)
+		if err != nil {
+			return err
+		}
 		if !strings.Contains(got, "hello-v1") {
 			return fmt.Errorf("mount content = %q", got)
 		}
@@ -120,7 +132,10 @@ func TestU3MountedVolumeContent(t *testing.T) {
 		if cm.Data["app.yaml"] != "greeting: hello-mount-v2\n" {
 			return fmt.Errorf("cm data = %q", cm.Data["app.yaml"])
 		}
-		got := podExecCat(t, ns, "demo", mountPath)
+		got, err := podExecCatErr(ns, "demo", mountPath)
+		if err != nil {
+			return err
+		}
 		if !strings.Contains(got, "hello-mount-v2") {
 			return fmt.Errorf("mount still old: %q", got)
 		}

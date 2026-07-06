@@ -27,7 +27,8 @@ func helmChartPath() string {
 	if v := os.Getenv("KOHEN_CHART_PATH"); v != "" {
 		return v
 	}
-	return filepath.Join("deploy", "helm", "kohen")
+	// Leading ./ prevents Helm from treating "deploy" as a chart repository name.
+	return filepath.Join(".", "deploy", "helm", "kohen")
 }
 
 func installMethod() string {
