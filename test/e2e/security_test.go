@@ -89,22 +89,29 @@ func TestU3PodSecurityConformance(t *testing.T) {
 func TestU3RBACConformance(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(t)
+	// Namespaced operators only watch their release namespace; cluster-scoped
+	// operators reconcile any namespace.
 	ns := "kohen-e2e-rbac"
+	gitSvc, workload := "gitserver", "app"
+	if rbacScope() == "namespaced" {
+		ns = operatorNamespace()
+		gitSvc, workload = "gitserver-rbac", "app-rbac"
+	}
 	setupNamespace(t, c, ns)
-	deployGitServer(t, c, ns, "gitserver", nil)
-	deployDeployment(t, c, ns, "app")
+	deployGitServer(t, c, ns, gitSvc, nil)
+	deployDeployment(t, c, ns, workload)
 	createCredentialSecret(t, c, ns, "git-creds", insecureTLSSecret())
 
 	cs := &kohenv1alpha1.ConfigSync{
 		ObjectMeta: metav1.ObjectMeta{Name: "rbac-sync", Namespace: ns},
 		Spec: kohenv1alpha1.ConfigSyncSpec{
 			Source: kohenv1alpha1.GitSource{
-				URL:           gitURL(ns, "gitserver"),
+				URL:           gitURL(ns, gitSvc),
 				Ref:           "main",
 				AuthSecretRef: &kohenv1alpha1.LocalObjectReference{Name: "git-creds"},
 			},
 			Path:        "svc",
-			WorkloadRef: kohenv1alpha1.WorkloadReference{Kind: "Deployment", Name: "app"},
+			WorkloadRef: kohenv1alpha1.WorkloadReference{Kind: "Deployment", Name: workload},
 			Rollout:     kohenv1alpha1.RolloutAuto,
 			Sync:        kohenv1alpha1.SyncSpec{Interval: metav1.Duration{Duration: 5 * time.Second}},
 		},
@@ -146,7 +153,7 @@ func TestU3RBACConformance(t *testing.T) {
 	// Allow the informer cache to observe the RBAC change.
 	time.Sleep(5 * time.Second)
 
-	commitFile(t, ns, "gitserver", 18460, "svc/app.yaml", "greeting: rbac-stripped\n")
+	commitFile(t, ns, gitSvc, 18460, "svc/app.yaml", "greeting: rbac-stripped\n")
 	eventually(t, 120*time.Second, "workload wiring fails without patch RBAC", func() error {
 		got := &kohenv1alpha1.ConfigSync{}
 		if err := c.Get(ctx, key, got); err != nil {

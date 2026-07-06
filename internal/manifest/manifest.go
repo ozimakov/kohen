@@ -30,6 +30,23 @@ type typeMeta struct {
 	Kind       string `yaml:"kind"`
 }
 
+// IsKubernetesManifest reports whether data contains at least one YAML document
+// that declares a Kubernetes object (both apiVersion and kind are set).
+// Multi-document YAML is supported. Plain config without type metadata is not
+// a match.
+func IsKubernetesManifest(data []byte) bool {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var tm typeMeta
+		if err := dec.Decode(&tm); err != nil {
+			return false
+		}
+		if tm.APIVersion != "" && tm.Kind != "" {
+			return true
+		}
+	}
+}
+
 // IsExternalSecret reports whether data contains at least one YAML document that
 // declares an External Secrets Operator ExternalSecret. Multi-document YAML
 // (separated by `---`) is supported; a match in any document classifies the

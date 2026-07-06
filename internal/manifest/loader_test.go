@@ -60,7 +60,6 @@ func TestLoadIgnoresNonManifests(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"a.yaml": "key: value\n",
 		"b.json": `{"foo":"bar"}`,
-		"c.yml":  "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
 	})
 	objs, err := manifest.Load(dir)
 	if err != nil {
@@ -71,15 +70,32 @@ func TestLoadIgnoresNonManifests(t *testing.T) {
 	}
 }
 
-func TestLoadMultiDocPicksExternalSecretOnly(t *testing.T) {
+func TestLoadFindsDisallowedKind(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"rogue.yaml": `apiVersion: v1
+kind: Secret
+metadata:
+  name: rogue
+`,
+	})
+	objs, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || objs[0].U.GetKind() != "Secret" {
+		t.Fatalf("want Secret manifest loaded for guard rejection, got %+v", objs)
+	}
+}
+
+func TestLoadMultiDocReturnsAllKubernetesObjects(t *testing.T) {
 	multi := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n---\n" + esDoc
 	dir := writeTree(t, map[string]string{"mixed.yaml": multi})
 	objs, err := manifest.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objs) != 1 || objs[0].U.GetName() != "db-es" {
-		t.Fatalf("want only the ExternalSecret doc, got %+v", objs)
+	if len(objs) != 2 {
+		t.Fatalf("want ConfigMap + ExternalSecret, got %+v", objs)
 	}
 }
 

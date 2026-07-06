@@ -81,6 +81,7 @@ jobs:
       - name: Install Kohen (plain manifests)
         if: matrix.install == 'manifests'
         run: |
+          kubectl create namespace kohen-system --dry-run=client -o yaml | kubectl apply -f -
           helm template kohen deploy/helm/kohen --include-crds \
             --namespace kohen-system \
             --set image.repository=kohen \
