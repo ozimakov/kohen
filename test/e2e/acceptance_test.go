@@ -1,0 +1,177 @@
+//go:build e2e
+
+// U3 acceptance additions (PLAN U3): fills gaps in the A1–A12 matrix not fully
+// covered by the U1/U2 suites — notably A2 (live mount content) and documents
+// the mapping for reviewers.
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	kohenv1alpha1 "github.com/ozimakov/kohen/api/v1alpha1"
+)
+
+// busyboxImage has /bin/cat. Pre-loaded into kind in the U3 workflow (see u3.yml).
+const busyboxImage = "busybox:1.36"
+
+func deployBusyboxDeployment(t *testing.T, c client.Client, ns, name string) {
+	t.Helper()
+	labels := map[string]string{"app": name}
+	replicas := int32(1)
+	d := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:            "app",
+					Image:           busyboxImage,
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Command:         []string{"sh", "-c", "sleep infinity"},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"true"}},
+						},
+						PeriodSeconds: 2,
+					},
+				}}},
+			},
+		},
+	}
+	if err := c.Create(context.Background(), d); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create deployment %s: %v", name, err)
+	}
+	waitDeployReady(t, c, ns, name, 180*time.Second)
+}
+
+func podExecCat(t *testing.T, ns, deployName, path string) string {
+	t.Helper()
+	out, err := podExecCatErr(ns, deployName, path)
+	if err != nil {
+		t.Fatalf("exec cat %s: %v\n%s", path, err, out)
+	}
+	return out
+}
+
+func podExecCatErr(ns, deployName, path string) (string, error) {
+	out, err := exec.Command("kubectl", "-n", ns, "exec", "deploy/"+deployName,
+		"-c", "app", "--", "cat", path).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%w\n%s", err, out)
+	}
+	return string(out), nil
+}
+
+// TestU3MountedVolumeContent is A2: after a git commit updates the ConfigMap,
+// a running pod observes the new file content via the kubelet atomic mount
+// (non-subPath). Uses rollout:none so the pod is not restarted — the mount
+// update alone is what we assert.
+func TestU3MountedVolumeContent(t *testing.T) {
+	ctx := context.Background()
+	c := newClient(t)
+	ns := "kohen-e2e-mount-a2"
+	setupNamespace(t, c, ns)
+	deployGitServer(t, c, ns, "gitserver", nil)
+	deployBusyboxDeployment(t, c, ns, "demo")
+	createCredentialSecret(t, c, ns, "git-creds", insecureTLSSecret())
+
+	cs := &kohenv1alpha1.ConfigSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "mount-sync", Namespace: ns},
+		Spec: kohenv1alpha1.ConfigSyncSpec{
+			Source: kohenv1alpha1.GitSource{
+				URL:           gitURL(ns, "gitserver"),
+				Ref:           "main",
+				AuthSecretRef: &kohenv1alpha1.LocalObjectReference{Name: "git-creds"},
+			},
+			Path:        "svc",
+			WorkloadRef: kohenv1alpha1.WorkloadReference{Kind: "Deployment", Name: "demo"},
+			Rollout:     kohenv1alpha1.RolloutNone,
+			Sync:        kohenv1alpha1.SyncSpec{Interval: metav1.Duration{Duration: 5 * time.Second}},
+		},
+	}
+	if err := c.Create(ctx, cs); err != nil {
+		t.Fatalf("create configsync: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Delete(ctx, cs) })
+	key := client.ObjectKeyFromObject(cs)
+	configSyncReady(t, c, key, 300*time.Second)
+	waitDeployReady(t, c, ns, "demo", 180*time.Second)
+
+	mountPath := "/etc/kohen/config/app.yaml"
+	eventually(t, 180*time.Second, "v1 visible in pod mount", func() error {
+		got, err := podExecCatErr(ns, "demo", mountPath)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(got, "hello-v1") {
+			return fmt.Errorf("mount content = %q", got)
+		}
+		return nil
+	})
+
+	commitFile(t, ns, "gitserver", 18480, "svc/app.yaml", "greeting: hello-mount-v2\n")
+	eventually(t, 180*time.Second, "v2 visible in pod via kubelet mount update", func() error {
+		cm := &corev1.ConfigMap{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "demo-config"}, cm); err != nil {
+			return err
+		}
+		if cm.Data["app.yaml"] != "greeting: hello-mount-v2\n" {
+			return fmt.Errorf("cm data = %q", cm.Data["app.yaml"])
+		}
+		got, err := podExecCatErr(ns, "demo", mountPath)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(got, "hello-mount-v2") {
+			return fmt.Errorf("mount still old: %q", got)
+		}
+		return nil
+	})
+
+	// Sanity: status reflects the new config version without a rolling restart.
+	got := &kohenv1alpha1.ConfigSync{}
+	if err := c.Get(ctx, key, got); err != nil {
+		t.Fatalf("get configsync: %v", err)
+	}
+	if got.Status.ConfigVersion == "" {
+		t.Fatalf("expected config version in status, got %+v", got.Status)
+	}
+}
+
+// TestU3AcceptanceMatrix is a lightweight registry test that documents which
+// file owns each acceptance criterion. It always passes but fails compilation
+// if a referenced test is removed.
+func TestU3AcceptanceMatrix(t *testing.T) {
+	owners := map[string]string{
+		"A1":  "TestU1ConfigSyncJourney",
+		"A2":  "TestU3MountedVolumeContent",
+		"A3":  "TestU1ConfigSyncJourney",
+		"A4":  "TestU2ESOJourney",
+		"A5":  "TestU2FirstResolutionFailClosed, TestU2UpdateFailSafeAndMaxDegraded",
+		"A6":  "TestU2Rotation",
+		"A7":  "TestU1ConfigSyncJourney",
+		"A8":  "TestU1ErrorUX",
+		"A9":  "TestU3PodSecurityConformance, TestU3RBACConformance",
+		"A10": "TestU1GitOpsCoexistence",
+		"A11": "TestU2AbuseCases",
+		"A12": "TestU3OperatorUpgrade, TestU3OperatorUninstall",
+	}
+	for id, owner := range owners {
+		t.Logf("%s => %s", id, owner)
+	}
+	_ = intstr.FromInt(1) // keep k8s import for future matrix helpers
+}

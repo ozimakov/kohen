@@ -20,18 +20,22 @@ whenever the config changes — version-matched across the fleet.
 - [`SPEC.md`](./SPEC.md) — full technical/non-technical requirements,
   architecture, consistency model, threat model, and acceptance criteria.
 - [`PLAN.md`](./PLAN.md) — the implementation sequence toward **v1.0**.
-- [Getting Started & GitOps Coexistence runbook](./docs/getting-started-and-gitops.md)
-  — the verified, copy-pasteable walkthrough (install → sync → rollout → auth →
-  rollback → cleanup → Argo CD / Flux coexistence), exercised end-to-end in CI on
-  `kind` (see [`test/e2e`](./test/e2e)).
+- [Concepts](./docs/concepts.md) — architecture, reconcile flow, consistency model.
+- [Install](./docs/install.md) — Helm and plain manifests, both RBAC scopes.
+- [Getting Started & GitOps runbook](./docs/getting-started-and-gitops.md)
+  — verified Day-1 walkthrough (install → sync → rollout → auth → rollback →
+  GitOps coexistence), exercised in CI on `kind`.
 - [Secret integration guide (ESO + native)](./docs/secrets.md) — reference
-  ESO-backed and native `Secret`s from a `ConfigSync`, safely; readiness,
-  rotation, guard rails, and the Vault-via-ESO decision tree.
+  secrets safely; readiness, rotation, guard rails, Vault-via-ESO tree.
+- [Operations](./docs/operations.md) — kubectl status, force-sync, rollback.
+- [Troubleshooting](./docs/troubleshooting.md) — symptom → condition → action.
+- [Security hardening](./docs/security.md) — threat model, RBAC, allow-lists.
+- [Upgrade & uninstall](./docs/upgrade-uninstall.md) — SemVer, CRD policy, A12.
 
-> **Status:** Phase 1 (config-only) and Phase 2 (secret integration) are
-> implemented. `spec.secretRefs` supports the two v1 backends — `externalSecret`
-> (External Secrets Operator) and `nativeSecret` — surfaced as files or env vars
-> (see the [secret integration guide](./docs/secrets.md)).
+> **Status:** Phases 0–2 and **Phase 3 (ship readiness)** are implemented.
+> The [U3 acceptance gate](./.github/workflows/u3.yml) automates criteria
+> **A1–A12** on `kind` (two Kubernetes minors, Helm + plain manifests).
+> `spec.secretRefs` supports `externalSecret` and `nativeSecret` backends.
 
 ---
 

@@ -85,6 +85,20 @@ docker-build: ## Build the operator and e2e gitserver images.
 	docker build -t $(IMG) -f Dockerfile .
 	docker build -t $(GITSERVER_IMG) -f test/e2e/gitserver/Dockerfile .
 
+.PHONY: image
+image: ## Build multi-arch operator images (amd64 + arm64) via buildx.
+	docker buildx build --platform linux/amd64,linux/arm64 \
+		-t $(IMG) -f Dockerfile --load .
+
+.PHONY: manifests-bundle
+manifests-bundle: ## Render plain Kubernetes manifests from the Helm chart.
+	mkdir -p deploy/manifests
+	helm template kohen deploy/helm/kohen --include-crds \
+		--namespace kohen-system > deploy/manifests/kohen.yaml
+	helm template kohen deploy/helm/kohen --include-crds \
+		--namespace kohen-system --set scope=namespaced \
+		> deploy/manifests/kohen-namespaced.yaml
+
 .PHONY: kind-load
 kind-load: ## Load the built images into the kind cluster.
 	kind load docker-image $(IMG) --name $(KIND_CLUSTER)
@@ -97,6 +111,31 @@ e2e: ## Run the U1 config e2e suite (requires a kind cluster with Kohen installe
 .PHONY: e2e-secrets
 e2e-secrets: ## Run the U2 secret-integration e2e suite (requires kind + Kohen + ESO installed; see .github/workflows/e2e.yml).
 	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 25m -v -run '^TestU2' ./test/e2e/...
+
+.PHONY: e2e-security
+e2e-security: ## Run S3.1 security conformance tests (A9).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 15m -v -run '^TestU3(PodSecurity|RBAC|Namespaced)' ./test/e2e/...
+
+.PHONY: e2e-acceptance
+e2e-acceptance: ## Run U3 acceptance additions (A2 matrix doc + mount content).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) $(GO) test -tags e2e -count=1 -timeout 15m -v -run '^TestU3(Acceptance|Mounted)' ./test/e2e/...
+
+.PHONY: e2e-lifecycle
+e2e-lifecycle: ## Run A12 upgrade test (set KOHEN_ALLOW_UNINSTALL=true for uninstall).
+	GITSERVER_IMAGE=$(GITSERVER_IMG) KOHEN_IMAGE=$(IMG) KOHEN_CHART_PATH=$(CURDIR)/deploy/helm/kohen $(GO) test -tags e2e -count=1 -timeout 20m -v -run '^TestU3Operator' ./test/e2e/...
+
+.PHONY: e2e-u3
+e2e-u3: ## Run the full U3 acceptance gate (U1 + U2 + security + acceptance + upgrade).
+	$(MAKE) e2e
+	$(MAKE) e2e-secrets
+	$(MAKE) e2e-security
+	$(MAKE) e2e-acceptance
+	$(MAKE) e2e-lifecycle
+
+.PHONY: verify-docs
+verify-docs: ## Validate SPEC refs in PLAN.md and doc links.
+	bash scripts/verify-spec-refs.sh
+	bash scripts/verify-doc-links.sh
 
 .PHONY: vet
 vet: ## Run go vet.
@@ -114,5 +153,5 @@ $(GOLANGCI_LINT):
 	GOBIN=$(GOBIN) $(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 .PHONY: verify
-verify: tidy vet build test ## Run the full local verification suite.
+verify: tidy vet build test verify-docs ## Run the full local verification suite.
 	@git diff --exit-code go.mod go.sum

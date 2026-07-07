@@ -312,7 +312,8 @@ func (r *Renderer) consider(base, path, sep string, seen map[string]string, out 
 }
 
 // excluded reports whether a file must be kept out of the ConfigMap (SPEC R7.6):
-// reserved kohen.* files and recognized ExternalSecret manifests.
+// reserved kohen.* files and Kubernetes manifest-shaped YAML (including
+// ExternalSecret manifests and other kinds rejected at apply time).
 func excluded(path, rel string) bool {
 	name := filepath.Base(rel)
 	if strings.HasPrefix(name, reservedPrefix) {
@@ -326,7 +327,7 @@ func excluded(path, rel string) bool {
 			// silently excluding real content.
 			return false
 		}
-		return manifest.IsExternalSecret(data)
+		return manifest.IsKubernetesManifest(data)
 	}
 	return false
 }

@@ -21,15 +21,15 @@ type Object struct {
 	Source string
 }
 
-// Load walks the config tree rooted at root and returns every recognized
-// apply-if-present manifest (v1: ExternalSecret) it finds (SPEC §8.2, R7.6).
+// Load walks the config tree rooted at root and returns every Kubernetes
+// manifest-shaped document (apiVersion + kind) it finds (SPEC §8.2, R7.6).
+// Guard rails (R-AUTH.4) reject kinds other than ExternalSecret at apply time.
 // Non-manifest documents are ignored (they are ConfigMap content, handled by
 // the renderer). Symlinks that escape the root are rejected as a safety
 // violation (R7.5), mirroring the renderer's tree contract.
 //
-// Multi-document files are supported: only the recognized ExternalSecret
-// documents in a file are returned. Files that are not valid YAML/JSON are
-// skipped (they cannot be manifests).
+// Multi-document files are supported: every Kubernetes-shaped document in a
+// file is returned. Files that are not valid YAML/JSON are skipped.
 func Load(root string) ([]Object, error) {
 	base, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -75,8 +75,9 @@ func Load(root string) ([]Object, error) {
 }
 
 // parseFile decodes all YAML/JSON documents in a file and returns those that
-// are recognized ExternalSecret manifests. A document that fails to decode is
-// treated as a non-manifest (skipped) so plain config never blocks the walk.
+// declare a Kubernetes object (apiVersion + kind). A document that fails to
+// decode is treated as a non-manifest (skipped) so plain config never blocks
+// the walk.
 func parseFile(path string) ([]*unstructured.Unstructured, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -97,7 +98,7 @@ func parseFile(path string) ([]*unstructured.Unstructured, error) {
 		}
 		u := &unstructured.Unstructured{Object: m}
 		gvk := u.GroupVersionKind()
-		if gvk.Kind == ExternalSecretKind && gvk.Group == ExternalSecretsGroup {
+		if gvk.Kind != "" && u.GetAPIVersion() != "" {
 			out = append(out, u)
 		}
 	}
