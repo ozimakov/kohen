@@ -99,7 +99,11 @@ Tagged releases (`v*`) publish via
 - Helm chart pushed to `oci://ghcr.io/<owner>/charts`
 - GitHub Release artifacts: chart `.tgz`, `kohen.yaml`, `kohen-namespaced.yaml`
 
-The project site is published from [`site/`](../site/) via
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+The project site is published from [`site/`](../site/) to the `gh-pages` branch
+via [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+
+**One-time setup:** Settings → Pages → Source **Deploy from a branch** →
+branch **`gh-pages`** / root. After that, every `main` change under `site/`
+updates https://ozimakov.github.io/kohen/.
 Release artifacts include an SPDX SBOM and cosign signatures when signing
 credentials are configured.
