@@ -17,6 +17,11 @@ Optional tightening:
 - Configure operator-level allow-lists (below) so only approved git sources and
   ESO stores can be used.
 
+**R-AUTH.2 (referable-secret policy)** — an operator-level policy restricting
+which Secrets a `ConfigSync` may wire — is **not implemented in v1.0** and is
+tracked as post-1.0. Until then, namespace RBAC for `configsyncs` is the control
+(R-AUTH.1).
+
 ## Install scope & blast radius (TM8)
 
 | Scope | Operator watches | Compromised operator can |
@@ -34,7 +39,7 @@ helm install kohen deploy/helm/kohen \
 ```
 
 The operator pod runs **non-root** with a **read-only root filesystem**
-(distrolless image, UID 65532). Conformance tests assert this posture (A9).
+(distroless image, UID 65532). Conformance tests assert this posture (A9).
 
 ## Allow-lists (R-AUTH.3 / R-AUTH.4)
 
@@ -73,7 +78,12 @@ Regardless of allow-lists, Kohen blocks:
 
 - Non-HTTPS/SSH schemes
 - Loopback, link-local (including `169.254.169.254`), unspecified, multicast
-- HTTP redirects to disallowed hosts
+- HTTP redirects to those blocked schemes/IPs (re-screened every hop)
+
+**v1.0 note:** redirect hops are **not** re-checked against the optional
+`sourceAllowList` (R-AUTH.3) — only scheme/blocked-IP guards apply on redirect.
+Prefer pinning sources that do not redirect across hosts, or leave the
+allow-list empty until post-1.0 hardens this.
 
 Git credentials must reference Secrets labeled `kohen.dev/git-credential=true`
 (R-AUTH.6). Unlabeled Secrets are rejected at reconcile time.

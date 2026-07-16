@@ -1,5 +1,5 @@
 # SemVer release pipeline (PLAN S3.3): tagged releases publish multi-arch images,
-# Helm chart artifacts, SBOM, and cosign signatures.
+# Helm chart artifacts (cluster + namespaced bundles), SBOM, and cosign signatures.
 name: Release
 
 on:
@@ -52,30 +52,34 @@ jobs:
         with:
           version: v3.16.3
 
-      - name: Package Helm chart
+      - name: Package & push Helm chart
         run: |
+          set -euo pipefail
           sed -i "s/^version:.*/version: ${{ steps.ver.outputs.version }}/" deploy/helm/kohen/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${{ steps.ver.outputs.version }}\"/" deploy/helm/kohen/Chart.yaml
           helm package deploy/helm/kohen -d dist/
           helm push dist/kohen-${{ steps.ver.outputs.version }}.tgz \
-            oci://ghcr.io/${{ github.repository_owner }}/charts || \
-            echo "Helm OCI push skipped (registry may need setup)"
+            oci://ghcr.io/${{ github.repository_owner }}/charts
 
-      - name: Render manifest bundle
+      - name: Render manifest bundles
         run: |
+          set -euo pipefail
           mkdir -p dist/manifests
           helm template kohen deploy/helm/kohen --include-crds \
             --namespace kohen-system > dist/manifests/kohen.yaml
+          helm template kohen deploy/helm/kohen --include-crds \
+            --namespace kohen-system \
+            --set scope=namespaced > dist/manifests/kohen-namespaced.yaml
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image
         env:
-          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
         run: |
-          cosign sign --yes "${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}" || \
-            echo "cosign sign skipped (experimental keyless may be unavailable)"
+          set -euo pipefail
+          cosign sign --yes "${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}"
 
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
@@ -83,4 +87,5 @@ jobs:
           files: |
             dist/*.tgz
             dist/manifests/kohen.yaml
+            dist/manifests/kohen-namespaced.yaml
           generate_release_notes: true

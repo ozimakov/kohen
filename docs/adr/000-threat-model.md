@@ -28,7 +28,7 @@ security-equivalent to creating a `Pod` that can mount namespace `Secret`s.
 
 | ID | Threat | Control | Owning step |
 | --- | --- | --- | --- |
-| TM1 | Confused deputy: wire arbitrary namespace Secrets | R-AUTH.1 document Pod-equivalent RBAC; optional R-AUTH.2 referable-secret policy | S3.1 / `docs/security.md` |
+| TM1 | Confused deputy: wire arbitrary namespace Secrets | R-AUTH.1 document Pod-equivalent RBAC; optional R-AUTH.2 referable-secret policy (**post-1.0** — see `docs/security.md`) | S3.1 / `docs/security.md` |
 | TM2 | Attacker-controlled git + permissive ESO stores | R-AUTH.3 source allow-list; R-AUTH.4 manifest kind/store allow-list | S1.1, S2.4, S3.1 |
 | TM3 | Cross-namespace reach | R-AUTH.5 locality (no cross-ns fields on API; manifest guard) | S1.3, S2.4 |
 | TM4 | Git-credential theft via arbitrary Secret ref | R-AUTH.6 `kohen.dev/git-credential` label | S1.1, S1.8 |

@@ -1,11 +1,16 @@
 # KOHEN — Specification
 
-> Status: **Draft v0.6** · Owner: Kohen maintainers · Last updated: 2026-07-04
+> Status: **v1.0** · Owner: Kohen maintainers · Last updated: 2026-07-16
 >
 > This document is the single source of truth for **what** Kohen is, **why** it
 > exists, and **which requirements** any implementation must satisfy. It is
 > intentionally implementation-light: it describes behavior, contracts, and
 > constraints rather than prescribing internal code structure.
+>
+> **Product version vs API version.** The **product** release is SemVer `1.0.x`.
+> The served CRD API remains `kohen.dev/v1alpha1` in v1.0.x (no conversion
+> webhook). Treat the API as alpha-stability: fields may evolve with conversion
+> when a `v1beta1`/`v1` is introduced; see `docs/upgrade-uninstall.md`.
 >
 > **Standing scope decisions.**
 > - Kohen ships as a cluster **operator** only; a per-workload sidecar/env-var
@@ -19,16 +24,10 @@
 >   (owned lifecycle); otherwise Kohen **awaits** an externally-managed secret
 >   (§8.2). Readiness: **first-resolution fail-closed, update fail-safe** (R8.9).
 >
-> **v0.6 (multi-role review fixes).** Narrowed v1 secret backends to
-> `externalSecret` + `nativeSecret` (Sealed Secrets = v1.1; Vault via ESO; CSI
-> deferred). Single config surface (`ConfigSync` only; in-repo `kohen.yaml`
-> deferred). Added: threat model (§3.3), authorization requirements (R-AUTH.\*),
-> concrete defaults (§11.2), container targeting, conditions contract (§11.4),
-> secret-version-token spec (R8.10), rotation/rollout split (env-only triggers),
-> `envFrom` removed (atomic list, not SSA-mergeable), `OnDelete`/`subPath`
-> caveats, SSRF/path-normalization guards, force-sync, git-auth secret schema,
-> GitOps compatibility matrix. `kohenctl`, webhooks, signed commits, overlay,
-> splitting, DaemonSet moved to post-1.0 (§19).
+> **v1.0.** Promotes Draft v0.6 to the shipping contract: closes the nested-path
+> key separator (`__`), documents poll-bounded secret rotation detection,
+> reconcile-time R-AUTH.6 enforcement, and the shipped conditions/`ManifestsApplied`
+> surface. See [`docs/reviews/v1.0-delivery-plan.md`](./docs/reviews/v1.0-delivery-plan.md).
 
 ---
 
@@ -224,8 +223,8 @@ operator), **external attacker** (network), **compromised operator pod**.
 | TM1 | A `ConfigSync` creator wires namespace `Secret`s into a pod they control (confused deputy) | **R-AUTH.1**: creating a `ConfigSync` is security-equivalent to creating a Pod (pods can already mount any namespace Secret). RBAC for `configsyncs` MUST be granted accordingly and this MUST be documented. Optional tightening: operator-level policy restricting referable `Secret`s per namespace (R-AUTH.2). |
 | TM2 | A `ConfigSync` points at an attacker-controlled git repo; committed `ExternalSecret`s pull from permissive stores | **R-AUTH.3**: optional (recommended-on) operator-level **git source allow-list**; syncs to non-allowed URLs fail closed. **R-AUTH.4**: applied manifests are restricted to namespaced, allow-listed kinds (`ExternalSecret`; `SealedSecret` in v1.1) and, when configured, an allow-list of `secretStoreRef` names. Cluster-scoped secret CRs MUST never be applied from a namespaced path. |
 | TM3 | Cross-namespace reach (wire ns-A secrets into ns-B workloads) | **R-AUTH.5**: `workloadRef`, target `ConfigMap`, and all resolved `Secret`s MUST be in the `ConfigSync`'s namespace. No cross-namespace mode in v1 (CEL-enforced). |
-| TM4 | Git-credential theft via `authSecretRef` pointing at arbitrary Secrets | **R-AUTH.6**: `authSecretRef` MUST reference a `Secret` labeled `kohen.dev/git-credential: "true"` (CEL/webhook enforced). |
-| TM5 | SSRF via `source.url` (metadata endpoints, internal hosts) | **R-AUTH.7**: scheme allow-list (`https`, `ssh`); link-local/metadata IP ranges blocked; redirects to disallowed hosts fail closed. |
+| TM4 | Git-credential theft via `authSecretRef` pointing at arbitrary Secrets | **R-AUTH.6**: `authSecretRef` MUST reference a `Secret` labeled `kohen.dev/git-credential: "true"` (reconcile-time fail-closed; CEL cannot cross-object lookup). |
+| TM5 | SSRF via `source.url` (metadata endpoints, internal hosts) | **R-AUTH.7**: scheme allow-list (`https`, `ssh`); link-local/metadata IP ranges blocked on every hop. **v1.0:** redirects are re-screened for scheme/blocked IPs; re-checking the hop against the optional **source allow-list** (R-AUTH.3) is post-1.0. |
 | TM6 | Malicious repo tree (path traversal, symlink escape) | **R7.5**: rendered keys MUST be relative and normalized; `..`, absolute paths, and symlinks escaping `path` MUST be rejected. |
 | TM7 | Git write access ≈ config-delivery authority | Documented explicitly: whoever can merge to a bound path controls the delivered config. Branch protection/review is the control; commit-signature verification is deferred hardening (§19). |
 | TM8 | Compromised operator pod | Blast radius = operator SA: read referenced `Secret`s and patch bound workloads **in served namespaces only** (T7). Namespace-scoped installation MUST be supported to bound this; the blast radius MUST be documented in the hardening guide. |
@@ -334,9 +333,15 @@ Kohen is a single operator `Deployment` reconciling `ConfigSync` resources.
 ### 6.1 The reconcile loop
 
 Triggers: poll interval (`spec.sync.interval`, default 30s), watch events on the
-`ConfigSync`, referenced `Secret`s/`ExternalSecret`s, owned objects, and the
-target workload, and the **force-sync annotation** (`kohen.dev/sync-now: <any>`
-on the `ConfigSync` triggers an immediate reconcile; the operator clears it).
+`ConfigSync`, owned objects, and the target workload, and the **force-sync
+annotation** (`kohen.dev/sync-now: <any>` on the `ConfigSync` triggers an
+immediate reconcile; the operator clears it).
+
+**v1.0 secret rotation detection** is **poll-bounded** (≤ `sync.interval`). The
+operator's Secret informer is intentionally label-restricted to git credentials
+(TM8/T6 footprint); referenced Secrets/ExternalSecrets are re-resolved each
+poll rather than via dedicated watches. Watch-driven rotation remains a
+post-1.0 enhancement.
 
 One cycle:
 
@@ -435,14 +440,17 @@ second config surface and precedence rules.
 ### 7.4 Config → `ConfigMap` mapping
 
 - **R7.4** Each regular file under `path` becomes one key in the target
-  `ConfigMap` (key = path relative to `path`, with `/` replaced by a documented
-  safe separator since ConfigMap keys cannot contain `/`; binary content →
-  `binaryData`). Mapping is deterministic and **verbatim** (no templating).
+  `ConfigMap` (key = path relative to `path`, with `/` replaced by `__`;
+  binary content → `binaryData`). Mapping is deterministic and **verbatim**
+  (no templating).
 - **R7.5 (tree safety).** Keys MUST be relative and normalized; `..`, absolute
   paths, and symlinks resolving outside `path` MUST be rejected (fail closed).
 - **R7.6 (exclusions).** Files that Kohen consumes as apply-if-present
   manifests (recognized `ExternalSecret`, and `SealedSecret` in v1.1) and
-  reserved `kohen.*` files are excluded from `ConfigMap` keys.
+  reserved `kohen.*` files are excluded from `ConfigMap` keys. **v1.0
+  implementation:** any Kubernetes-shaped YAML under the path is excluded from
+  ConfigMap keys; a non-`ExternalSecret` manifest fails the sync closed (users
+  cannot ship arbitrary k8s manifests as plain config data).
 - **R7.7 (oversize).** If rendered content would exceed the `ConfigMap` object
   size limit (T-LIMIT, with safety margin), the sync MUST fail closed with an
   actionable error (condition + event naming the offending size). Splitting is
@@ -641,14 +649,15 @@ the v1 fail-closed contract (R8.9).
 | Backend not ready — prior good version running | Fail safe (R8.9); keep last-good; `Degraded`; bounded by R8.11. |
 | Secret rotates (file-surfaced) | Kubelet updates in place; no rollout (R8.5). |
 | Secret rotates (env-surfaced) | Version advances → one rollout (R8.5, R-CONS). |
-| Version stamp already matches | No-op; no workload write (R-ROLLOUT.2). |
+| Version stamp already matches | No-op; **no workload write** — skip Wire (`rollout: auto`) / skip StampNoRestart when the object stamp already matches (`rollout: none`) (R-ROLLOUT.2, T3, A3). ConfigMap apply/prune still run. |
 | Workload not found / wrong kind / `OnDelete` | Object sync continues; `WorkloadWired=False` with reason (`WorkloadNotFound` / `UnsupportedStrategy`); no stamp. |
 | Second `ConfigSync` targets same workload | Rejected / `Degraded` (R-SINGLETON). |
 | Rollout stuck (crashloop on new config) | Built-in controller + `progressDeadlineSeconds`; surface status; never force-delete; rollback = pin prior ref. |
 | SSA conflict with another manager | Re-apply own fields only (R-WIRE.4); documented ignore rules (R-WIRE.5) prevent flapping. |
 | Operator down | Objects and stamps persist; no new versions; graceful recovery. |
 
-- **R10.1** Retries use bounded exponential backoff with jitter.
+- **R10.1** Retries use bounded exponential backoff (controller-runtime rate
+  limiter; additional jitter tuning is post-1.0).
 - **R10.2** Every failure state above maps to a **named condition reason**
   (§11.4) and a metric — not only logs. (Exception: "operator down" cannot set
   conditions by definition; it is observable via the health endpoints and the
@@ -699,15 +708,19 @@ spec:
         as: file
         mountPath: /etc/tls
 status:
+  observedGeneration: 3                  # last reconciled .metadata.generation
   sourceCommit: 9f1c2ab34…               # plain git SHA (correlate with git log)
   configVersion: git:9f1c2ab-sec:71aa02  # rollout-trigger identity (stamped value)
   workloadVersion: git:9f1c2ab-sec:71aa02
   rolloutInProgress: false
   secretRefs:                            # resolution state only — never values
-    - { name: db-password, resolved: true,  backend: externalSecret }
-    - { name: tls,         resolved: false, reason: SecretNotFound }
+    - { name: db-password, resolved: true,  backend: externalSecret, established: true }
+    - { name: tls,         resolved: false, reason: SecretNotFound, established: false }
   conditions: [ … ]                      # contract in §11.4
 ```
+
+`secretRefs` is capped at **32** entries; each `name` is DNS-1123 label, ≤50
+chars. The CRD shortName is `cs` (category `kohen`).
 
 ### 11.2 Defaults (normative)
 
@@ -724,15 +737,17 @@ status:
 
 ### 11.3 Validation & lifecycle requirements
 
-- **R11.1** CRDs validate via OpenAPI + CEL, including: namespace locality
-  (R-AUTH.5), credential label (R-AUTH.6), supported `workloadRef.kind`,
-  `rollout` enum, env surfacing combined with `rollout: none` (rejected,
-  §9.1), secret-ref conflicts (R8.12), and R-SINGLETON (webhook or
-  reconcile-time rejection).
-- **R11.2** Status reports `sourceCommit`, desired/stamped versions, rollout
-  state, and per-reference resolution (no values).
+- **R11.1** CRDs validate via OpenAPI + CEL where possible (namespace locality
+  R-AUTH.5, supported `workloadRef.kind`, `rollout` enum, env surfacing with
+  `rollout: none` rejected §9.1, secret-ref conflicts R8.12). **R-AUTH.6**
+  (git-credential label) and **R-SINGLETON** are enforced at **reconcile time**
+  (fail-closed) — CEL cannot perform cross-object lookups.
+- **R11.2** Status reports `observedGeneration`, `sourceCommit`, desired/stamped
+  versions, rollout state, and per-reference resolution including sticky
+  `established` (no values).
 - **R11.3** Deletion (finalizer): prune Kohen-owned objects and unwire owned
-  workload fields (R-WIRE.6); never delete the workload or un-owned secrets.
+  workload fields **and** retract both field managers' stamps (`kohen` +
+  `kohen-stamp`) (R-WIRE.6); never delete the workload or un-owned secrets.
 - **R11.4** Printer columns: `READY`, `SOURCE-COMMIT`, `CONFIG-VERSION`,
   `WORKLOAD-VERSION`, `AGE`.
 
@@ -742,10 +757,14 @@ status:
 | --- | --- | --- |
 | `Ready` | Overall: desired version fully applied, wired, converged | `Synced`, `Progressing`, `Degraded` |
 | `Fetched` | Git fetch/resolve of `spec.source` succeeded | `FetchFailed`, `AuthFailed`, `SourceNotAllowed`, `PathNotFound` |
-| `Rendered` | Config rendered within limits | `Oversize`, `TreeSafetyViolation` |
-| `SecretsReady` | All references resolved per R8.9 | `SecretNotFound`, `KeyMissing`, `AwaitingFirstResolution`, `BackendNotReady`, `DegradedServingLastGood`, `MaxDegradedExceeded` |
+| `Rendered` | Config rendered within limits | `Oversize`, `TreeSafetyViolation`, `InvalidKey`, `KeyConflict` |
+| `ManifestsApplied` | Apply-if-present secret manifests from git | `ManifestKindNotAllowed`, `ManifestNamespaceViolation`, `StoreNotAllowed`, `ManifestInvalid`, `ManifestApplyFailed` |
+| `SecretsReady` | All references resolved per R8.9 | `SecretNotFound`, `KeyMissing`, `AwaitingFirstResolution`, `BackendNotReady`, `DegradedServingLastGood`, `MaxDegradedExceeded`, `InvalidSurface` |
 | `WorkloadWired` | SSA merge of owned fields succeeded | `WorkloadNotFound`, `UnsupportedStrategy`, `ApplyConflict`, `SingletonViolation` |
 | `RolloutComplete` | Stamped version == workload's observed rolled-out state | `RollingOut`, `ProgressDeadlineExceeded` |
+
+`Ready=Progressing` covers an in-flight rollout; `ProgressDeadlineExceeded` maps
+to `Ready=Degraded` so stuck rollouts appear on the degraded gauge (R10.2).
 
 Every §10 failure row maps to one of these reasons (R10.2). Docs MUST include a
 troubleshooting table: *symptom → condition/reason → action*.
@@ -757,14 +776,17 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **T1** Go (current stable, ≥ 1.23); operator built on `controller-runtime`.
 - **T2** Maintained Go git library; shallow fetch / fetch-by-commit; fetches
   deduped by repo+commit across syncs.
-- **T3** All object writes via SSA with field manager `kohen`; idempotent
-  (same commit + tokens ⇒ same objects; same stamp ⇒ no workload write).
-- **T4** Kubernetes N-2 minor-version compatibility (declared; the v1 CI gate
-  runs latest + one older — see PLAN U3).
+- **T3** All object writes via SSA with field manager `kohen` (plus
+  `kohen-stamp` for `rollout: none` object annotations); idempotent
+  (same commit + tokens ⇒ same objects; same stamp ⇒ **no workload write**).
+- **T4** Kubernetes N-2 minor-version compatibility (declared floor **1.28+**;
+  the v1 CI gate runs latest + one older — see PLAN U3).
 - **T-LIMIT** `ConfigMap`/`Secret` bounded by ~1 MiB total object size; Kohen
   fails closed with margin (R7.7).
-- **T5** Multi-arch (`amd64`/`arm64`) minimal image; Helm + plain manifests.
-- **T6** Operator footprint documented and bounded.
+- **T5** Multi-arch (`amd64`/`arm64`) minimal image; Helm + plain manifests
+  (cluster-scoped and namespaced bundles).
+- **T6** Operator footprint documented and bounded (see `docs/operations.md`
+  and chart default requests/limits).
 - **T7** Least-privilege RBAC per install scope (§6.3): read `ConfigSync` +
   labeled credential Secrets + referenced Secrets/ExternalSecrets in served
   namespaces; write owned `ConfigMap`s/`ExternalSecret`s; `get/patch` target
@@ -775,23 +797,25 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **T8** Git/backend outages: keep last-good, degrade, never crash workloads.
 - **T9** Determinism: same inputs ⇒ byte-identical objects and stable version.
 - **T10** Efficient reconciliation at hundreds of syncs (work queues, shared
-  informers, rate limits, bounded fetch concurrency, watch-driven secret
-  rotation detection).
+  informers, rate limits, bounded fetch concurrency). Secret rotation detection
+  is poll-bounded in v1.0 (§6.1); watch-driven rotation is post-1.0.
 
 ---
 
 ## 13. Observability
 
 - **R13.1 Metrics (Prometheus):** reconcile counts/duration; fetch
-  latency/errors; renders (incl. oversize failures); secret resolution
-  success/failure/pending (counts; bounded labels); rollouts triggered vs
-  skipped-on-match; degraded gauges (incl. `MaxDegradedExceeded`); current
-  version info metric.
+  latency/errors (incl. credential-load auth failures); renders (incl. oversize
+  failures); apply/prune totals; secret resolution success/failure/pending
+  (counts; bounded labels); wire errors by reason; rollouts triggered vs
+  skipped-on-match; `ProgressDeadlineExceeded` counter; degraded gauges;
+  `MaxDegradedExceeded` counter; current version info metric.
 - **R13.2 Logging:** structured JSON, centralized redaction (R8.3).
 - **R13.3 Health:** standard readiness/liveness; liveness never flaps on
   git/backend outage.
-- **R13.4 Events:** applies, prunes, stamps/rollouts, resolution transitions,
-  all failure reasons.
+- **R13.4 Events:** apply/prune **failures**, stamps/rollouts, secret
+  resolution **transitions**, finalizer unwire/prune, and all failure reasons.
+  Continuous successful apply/prune are metrics+conditions only (avoid spam).
 - **R13.5 Audit:** `sourceCommit` + config version readable from status and
   workload metadata (UC7).
 
@@ -825,8 +849,10 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **NFR9 Testing:** unit + integration (envtest, git fixture) + e2e (`kind`);
   leak tests on every PR touching reconcile/logging; abuse-case tests for
   R-AUTH.\* (see PLAN).
-- **NFR10 Versioning:** SemVer; CRD deprecation policy; breaking CRD changes
-  require a new API version with conversion.
+- **NFR10 Versioning:** SemVer for the **product** (`1.0.x`); CRD API remains
+  `v1alpha1` in v1.0.x with a documented compatibility promise
+  (`docs/upgrade-uninstall.md`). Breaking CRD changes require a new API version
+  with conversion.
 
 ---
 
@@ -873,7 +899,9 @@ v1 ships no CLI (N7). Documented `kubectl` recipes cover:
   perms, succeeds with them).
 - **A10** GitOps coexistence: with an SSA-based GitOps controller (Argo CD or
   Flux) managing the same workload and the documented ignore rules applied,
-  there is **no flapping** and both controllers converge.
+  there is **no flapping** and both controllers converge. **v1.0 CI** exercises
+  this with a simulated second SSA field manager that is mechanically equivalent;
+  a live Argo CD/Flux job is post-1.0.
 - **A11** Abuse cases fail closed: disallowed `source.url` (allow-list),
   unlabeled `authSecretRef`, cross-namespace reference, second `ConfigSync` on
   the same workload, applied-manifest kind/store outside the allow-list.
@@ -908,9 +936,8 @@ v1 ships no CLI (N7). Documented `kubectl` recipes cover:
 
 ## 18. Open Questions
 
-1. **Key separator for nested paths** (R7.4): `ConfigMap` keys cannot contain
-   `/`; pick and document the separator (e.g. `__`) — cosmetic but
-   user-visible.
+1. ~~**Key separator for nested paths** (R7.4)~~ — **Resolved (v1.0):** nested
+   paths use `__` as the `ConfigMap` key separator (see README / `docs/concepts.md`).
 2. **Sealed Secrets v1.1 shape:** same apply-if-present engine; confirm policy
    controls (issuer/key scope) before enabling.
 3. **GitOps snippet shipping:** docs-only vs generated `ignoreDifferences`
@@ -926,7 +953,11 @@ signed-commit verification · overlay/light templating · `ConfigMap` splitting 
 `DaemonSet` targets · Reloader interop mode · progressive rollout strategies ·
 in-repo `kohen.yaml` control surface · strict multi-tenant authorization
 (policy CR / admission webhook) · sidecar/env-var mode · direct-file-volume
-mode · sync history CR (`ConfigRelease`).
+mode · sync history CR (`ConfigRelease`) · **watch-driven secret rotation**
+(metadata informers) · **live Argo CD/Flux A10 e2e** · **R-AUTH.2**
+referable-secret policy · redirect re-check against source allow-list · nested
+mount overlap rejection beyond exact path equality · API promote to
+`v1beta1`/`v1`.
 
 ---
 

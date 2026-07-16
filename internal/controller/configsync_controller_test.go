@@ -649,6 +649,94 @@ func TestPipelineFinalizerCleanup(t *testing.T) {
 	if len(d.Spec.Template.Spec.Containers[0].VolumeMounts) != 0 {
 		t.Errorf("mount not retracted on delete")
 	}
+	if _, ok := d.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA]; ok {
+		t.Errorf("pod-template stamp not retracted on delete: %v", d.Spec.Template.Annotations)
+	}
+}
+
+func TestPipelineFinalizerClearsNoneStamp(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "none-dapp")
+	cs := makeConfigSync(t, env, "none-dsync", "none-dapp", kohenv1alpha1.RolloutNone)
+	key := client.ObjectKeyFromObject(cs)
+
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "99aabbccddeeff00"})
+	reconcileN(t, r, key, 2)
+
+	d := &appsv1.Deployment{}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "none-dapp", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Annotations[kohenv1alpha1.AnnotationConfigSHA] == "" {
+		t.Fatal("expected object-level stamp before delete")
+	}
+
+	cs = getCS(t, env, key)
+	if err := env.Client.Delete(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	reconcileN(t, r, key, 2)
+
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "none-dapp", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.Annotations[kohenv1alpha1.AnnotationConfigSHA]; ok {
+		t.Errorf("object stamp (kohen-stamp) not retracted on delete: %v", d.Annotations)
+	}
+}
+
+func TestPipelineRolloutNoneResetsRolloutInProgress(t *testing.T) {
+	env := testenv.Start(t)
+	makeDeployment(t, env, "rip-app")
+	cs := makeConfigSync(t, env, "rip-sync", "rip-app", kohenv1alpha1.RolloutNone)
+	key := client.ObjectKeyFromObject(cs)
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "aabbccddeeff0011"})
+
+	// Seed a stale rolloutInProgress before reconcile (e.g. after auto→none).
+	cs = getCS(t, env, key)
+	cs.Status.RolloutInProgress = true
+	if err := env.Client.Status().Update(context.Background(), cs); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileN(t, r, key, 2)
+	cs = getCS(t, env, key)
+	if cs.Status.RolloutInProgress {
+		t.Errorf("rolloutInProgress still true after rollout:none sync")
+	}
+}
+
+func TestPipelineSkipsWireWhenStampMatches(t *testing.T) {
+	env := testenv.Start(t)
+	ctx := context.Background()
+	makeDeployment(t, env, "skip-app")
+	cs := makeConfigSync(t, env, "skip-sync", "skip-app", kohenv1alpha1.RolloutAuto)
+	key := client.ObjectKeyFromObject(cs)
+	dir := fixtureDir(t, map[string]string{"app.yaml": "a: b\n"})
+	r := newReconciler(env, &fakeFetcher{dir: dir, commit: "ccddeeff00112233"})
+	reconcileN(t, r, key, 2)
+
+	d := &appsv1.Deployment{}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "skip-app", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	genBefore := d.Generation
+	rvBefore := d.ResourceVersion
+
+	// Same version again — stamp matches ⇒ no workload write (R-ROLLOUT.2).
+	reconcileN(t, r, key, 1)
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "skip-app", Namespace: "default"}, d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Generation != genBefore {
+		t.Errorf("generation advanced on stamp-match reconcile: %d → %d", genBefore, d.Generation)
+	}
+	if d.ResourceVersion != rvBefore {
+		t.Errorf("resourceVersion changed on stamp-match reconcile: %s → %s", rvBefore, d.ResourceVersion)
+	}
 }
 
 func TestPipelineCredentialMissingLabel(t *testing.T) {

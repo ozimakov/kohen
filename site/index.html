@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kohen — git config, version-matched rollouts</title>
+  <meta name="description" content="Kohen keeps Kubernetes workloads in sync with a dedicated git configuration repository — ConfigMaps, secret wiring, and exactly-one rollouts." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <a class="wordmark" href="./">Kohen</a>
+    <nav aria-label="Primary">
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/ozimakov/kohen">GitHub</a>
+      <a class="nav-cta" href="https://github.com/ozimakov/kohen/releases">Releases</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-label="Intro">
+      <div class="hero-copy">
+        <p class="brand">Kohen</p>
+        <h1>Git config that rolls with the workload</h1>
+        <p class="lede">
+          Point a <code>ConfigSync</code> at a repo path and a Deployment.
+          Kohen renders the ConfigMap, wires the mount, and stamps exactly one rolling update when the version changes.
+        </p>
+        <div class="cta-row">
+          <a class="btn primary" href="docs.html#install">Install v1.0</a>
+          <a class="btn ghost" href="https://github.com/ozimakov/kohen#getting-started">Getting started</a>
+        </div>
+      </div>
+      <div class="hero-visual" aria-hidden="true">
+        <svg class="flow" viewBox="0 0 960 540" role="img">
+          <defs>
+            <linearGradient id="plane" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#0f2a24"/>
+              <stop offset="55%" stop-color="#1a3d34"/>
+              <stop offset="100%" stop-color="#0b1c18"/>
+            </linearGradient>
+            <linearGradient id="trace" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#c4a35a" stop-opacity="0"/>
+              <stop offset="40%" stop-color="#e2c27a"/>
+              <stop offset="100%" stop-color="#7eb8a2" stop-opacity="0.2"/>
+            </linearGradient>
+          </defs>
+          <rect width="960" height="540" fill="url(#plane)"/>
+          <g class="grid">
+            <path d="M0 90 H960 M0 180 H960 M0 270 H960 M0 360 H960 M0 450 H960" stroke="#2f5a4e" stroke-opacity=".35"/>
+            <path d="M120 0 V540 M240 0 V540 M360 0 V540 M480 0 V540 M600 0 V540 M720 0 V540 M840 0 V540" stroke="#2f5a4e" stroke-opacity=".22"/>
+          </g>
+          <path class="pulse" d="M80 270 C220 120, 340 420, 480 270 S740 120, 880 270" fill="none" stroke="url(#trace)" stroke-width="3"/>
+          <g class="nodes" font-family="IBM Plex Mono, monospace" font-size="18" fill="#e8f2ec">
+            <text x="100" y="250">git</text>
+            <text x="430" y="250">ConfigMap</text>
+            <text x="760" y="250">rollout</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <section class="strip" id="why">
+      <h2>One job</h2>
+      <p>
+        Kohen is not another GitOps control plane. It coexists with Argo CD and Flux,
+        owning only the config surface your app consumes — with stamps you can read
+        and rollbacks you already know (<code>git</code> pins).
+      </p>
+    </section>
+
+    <section class="strip alt" id="ship">
+      <h2>v1.0 artifacts</h2>
+      <p>
+        Multi-arch operator image, signed releases, Helm chart, and plain manifests
+        (cluster + namespaced scopes). Acceptance criteria A1–A12 gate every cut.
+      </p>
+      <p class="mono">
+        helm install kohen oci://ghcr.io/ozimakov/charts/kohen --version 1.0.0
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Apache-2.0 · <a href="https://github.com/ozimakov/kohen">ozimakov/kohen</a> · API <code>kohen.dev/v1alpha1</code></p>
+  </footer>
+  <script>
+    document.documentElement.classList.add("ready");
+  </script>
+</body>
+</html>

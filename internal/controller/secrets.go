@@ -58,8 +58,16 @@ func (r *ConfigSyncReconciler) resolveSecrets(ctx context.Context, cs *kohenv1al
 	for i := range refs {
 		ref := &refs[i]
 		res := r.resolveOne(ctx, cs.Namespace, ref)
-		if !res.Ready {
+		if res.Ready {
+			metrics.SecretResolveTotal.WithLabelValues("success").Inc()
+		} else {
 			metrics.SecretResolveErrors.WithLabelValues(knownResolveReason(res.Reason)).Inc()
+			result := "error"
+			switch res.Reason {
+			case kohenv1alpha1.ReasonAwaitingFirstResolution, kohenv1alpha1.ReasonBackendNotReady:
+				result = "pending"
+			}
+			metrics.SecretResolveTotal.WithLabelValues(result).Inc()
 		}
 		evals = append(evals, secret.EvaluatedRef{
 			Name:            ref.Name,

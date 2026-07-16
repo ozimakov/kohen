@@ -78,6 +78,13 @@ var (
 		Help: "Secret resolution not-ready outcomes by reason.",
 	}, []string{"reason"})
 
+	// SecretResolveTotal counts secret-resolution outcomes (success|error|pending)
+	// per R13.1. Labels are bounded enums — never secret names or values (R8.3).
+	SecretResolveTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kohen_secret_resolve_total",
+		Help: "Secret resolution outcomes by result (success|error|pending).",
+	}, []string{"result"})
+
 	// MaxDegradedExceededTotal counts occurrences of a ConfigSync serving
 	// last-good secrets beyond maxDegradedDuration — a security-visible signal
 	// (SPEC R8.11).
@@ -85,6 +92,30 @@ var (
 		Name: "kohen_secret_max_degraded_exceeded_total",
 		Help: "Times a ConfigSync exceeded maxDegradedDuration serving last-good secrets.",
 	})
+
+	// WireErrors counts WorkloadWired failures by §11.4 reason (R13.1, R10.2).
+	WireErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kohen_wire_errors_total",
+		Help: "Workload wiring failures by reason.",
+	}, []string{"reason"})
+
+	// ProgressDeadlineExceeded counts stuck rollouts (R13.1).
+	ProgressDeadlineExceeded = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kohen_progress_deadline_exceeded_total",
+		Help: "Times a workload rollout hit ProgressDeadlineExceeded.",
+	})
+
+	// ApplyTotal counts owned-object apply outcomes (R13.1).
+	ApplyTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kohen_apply_total",
+		Help: "Owned object apply outcomes by result (success|error).",
+	}, []string{"result"})
+
+	// PruneTotal counts owned-object prune outcomes (R13.1).
+	PruneTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kohen_prune_total",
+		Help: "Owned object prune outcomes by result (success|error).",
+	}, []string{"result"})
 )
 
 func init() {
@@ -99,7 +130,12 @@ func init() {
 		FetchDuration,
 		ConfigVersionInfo,
 		SecretResolveErrors,
+		SecretResolveTotal,
 		MaxDegradedExceededTotal,
+		WireErrors,
+		ProgressDeadlineExceeded,
+		ApplyTotal,
+		PruneTotal,
 	)
 }
 

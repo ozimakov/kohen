@@ -48,4 +48,14 @@ func TestStampNoRestartStampsObjectNotPodTemplate(t *testing.T) {
 	if _, ok := got.Spec.Template.Annotations[kohenv1alpha1.AnnotationConfigSHA]; ok {
 		t.Errorf("pod template must not carry the stamp in none mode: %v", got.Spec.Template.Annotations)
 	}
+
+	if err := rollout.ClearStamp(ctx, env.Client, "Deployment", "default", "none-app"); err != nil {
+		t.Fatalf("clear stamp: %v", err)
+	}
+	if err := env.Client.Get(ctx, client.ObjectKey{Name: "none-app", Namespace: "default"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Annotations[kohenv1alpha1.AnnotationConfigSHA]; ok {
+		t.Errorf("ClearStamp left object annotation: %v", got.Annotations)
+	}
 }
