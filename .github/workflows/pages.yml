@@ -1,4 +1,13 @@
-# Publish the project site (site/) to GitHub Pages.
+# Publish the project site (site/) to the gh-pages branch.
+#
+# One-time repo setup (Settings → Pages):
+#   Source: Deploy from a branch
+#   Branch: gh-pages / (root)
+#
+# The official actions/deploy-pages flow requires Pages to already be enabled
+# with "GitHub Actions" as the source; GITHUB_TOKEN cannot enable that. Branch
+# publishing keeps this workflow green and updates the site once Pages is
+# pointed at gh-pages.
 name: Pages
 
 on:
@@ -10,9 +19,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -20,15 +27,17 @@ concurrency:
 
 jobs:
   deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    name: Publish site/
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: site
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: github-actions[bot]@users.noreply.github.com
+          commit_message: 'Deploy site'
