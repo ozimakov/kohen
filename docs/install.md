@@ -13,6 +13,13 @@ minor), Helm 3.13+ (for Helm install).
 Watches `ConfigSync` resources in **all** namespaces.
 
 ```bash
+# From a release (recommended):
+helm install kohen oci://ghcr.io/ozimakov/kohen/charts/kohen \
+  --version 1.0.0 \
+  --namespace kohen-system --create-namespace \
+  --wait
+
+# Or from a git checkout:
 helm install kohen deploy/helm/kohen \
   --namespace kohen-system --create-namespace \
   --wait

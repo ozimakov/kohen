@@ -94,16 +94,36 @@ kubectl delete configsync <name> -n <namespace>
 Tagged releases (`v*`) publish via
 [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-- Multi-arch operator image (`linux/amd64`, `linux/arm64`) to GHCR, with SBOM
-- Cosign keyless signature (hard-fail — unsigned images do not ship)
-- Helm chart pushed to `oci://ghcr.io/<owner>/charts`
-- GitHub Release artifacts: chart `.tgz`, `kohen.yaml`, `kohen-namespaced.yaml`
+| Artifact | Location |
+| --- | --- |
+| Operator image (amd64/arm64) | `ghcr.io/ozimakov/kohen:<version>` (+ `:latest` for non-prereleases) |
+| Image SBOM + provenance | attached by `build-push-action` |
+| Cosign signature (keyless) | image **by digest** (hard-fail) + Helm chart OCI tag |
+| Helm chart (OCI) | `oci://ghcr.io/ozimakov/kohen/charts/kohen` |
+| GitHub Release files | chart `.tgz`, `kohen.yaml`, `kohen-namespaced.yaml` (image tag pinned), `SHA256SUMS` |
 
-The project site is published from [`site/`](../site/) to the `gh-pages` branch
-via [`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
+### Cut a release
+
+```bash
+# 1) Rehearse packaging (Actions → Release → dry_run=true), or locally:
+make release-package VERSION=1.0.0-rc.1
+
+# 2) Tag and push (triggers the full publish path):
+git tag -a v1.0.0-rc.1 -m "v1.0.0-rc.1"
+git push origin v1.0.0-rc.1
+```
+
+Prerelease tags (`v1.0.0-rc.1`, `-alpha`, `-beta`) create a GitHub **prerelease**
+and do **not** move `:latest`.
+
+After the first publish, make the GHCR packages **public** if anonymous pulls
+should work: Package settings → Change visibility → Public
+(`kohen` image and `kohen/charts/kohen` chart).
+
+### Project site
+
+Published from [`site/`](../site/) to the `gh-pages` branch via
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
 
 **One-time setup:** Settings → Pages → Source **Deploy from a branch** →
-branch **`gh-pages`** / root. After that, every `main` change under `site/`
-updates https://ozimakov.github.io/kohen/.
-Release artifacts include an SPDX SBOM and cosign signatures when signing
-credentials are configured.
+branch **`gh-pages`** / root → https://ozimakov.github.io/kohen/.

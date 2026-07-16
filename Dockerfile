@@ -1,5 +1,5 @@
 # Build the operator binary.
-FROM golang:1.23 AS build
+FROM --platform=$BUILDPLATFORM golang:1.23 AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -8,8 +8,12 @@ RUN go mod download
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=dev
+ARG COMMIT=none
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/operator ./cmd/operator
+    go build -trimpath \
+      -ldflags="-s -w -X github.com/ozimakov/kohen/internal/version.Version=${VERSION} -X github.com/ozimakov/kohen/internal/version.Commit=${COMMIT}" \
+      -o /out/operator ./cmd/operator
 
 # Minimal, non-root runtime image (SPEC hardening).
 FROM gcr.io/distroless/static:nonroot

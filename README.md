@@ -59,6 +59,13 @@ your config, wires it into the workload, and gives you version-matched rollouts.
 ### 1. Install Kohen (Helm)
 
 ```bash
+# From a published release:
+helm install kohen oci://ghcr.io/ozimakov/kohen/charts/kohen \
+  --version 1.0.0 \
+  --namespace kohen-system --create-namespace \
+  --wait
+
+# Or from this checkout:
 helm install kohen deploy/helm/kohen \
   --namespace kohen-system --create-namespace \
   --wait

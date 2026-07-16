@@ -33,6 +33,10 @@ First public product release. API group/version remains `kohen.dev/v1alpha1`
 
 ## [Unreleased]
 
-(nothing yet)
+### Changed
+
+- Release publishing automation: SemVer validation, dry-run packaging,
+  digest-based cosign, OCI chart under `ghcr.io/ozimakov/kohen/charts`,
+  pinned manifest image tags, `SHA256SUMS`, prerelease-aware `:latest`
 
 [1.0.0]: https://github.com/ozimakov/kohen/releases/tag/v1.0.0
