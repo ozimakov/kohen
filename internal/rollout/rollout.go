@@ -19,6 +19,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -164,6 +165,49 @@ func StatefulSetProgress(s *appsv1.StatefulSet) Progress {
 // (rollout: none) via SSA of the Kohen-owned annotation, without touching the
 // pod template so no restart is triggered (R-VERSION).
 func StampNoRestart(ctx context.Context, c client.Client, kind, ns, name, version string) error {
+	obj, err := stampObject(kind, ns, name)
+	if err != nil {
+		return err
+	}
+	obj.SetAnnotations(map[string]string{kohenv1alpha1.AnnotationConfigSHA: version})
+	return c.Patch(ctx, obj, client.Apply, client.FieldOwner(StampFieldManager))
+}
+
+// ClearStamp retracts the object-metadata config-sha annotation owned by
+// StampFieldManager (rollout: none). Unwire uses the wire field manager and
+// therefore cannot remove this annotation — finalize MUST call ClearStamp so
+// deletion leaves no Kohen stamp behind (R-WIRE.6, R11.3).
+func ClearStamp(ctx context.Context, c client.Client, kind, ns, name string) error {
+	obj, err := stampObject(kind, ns, name)
+	if err != nil {
+		return err
+	}
+	// SSA apply of an empty owned set retracts fields previously owned by
+	// StampFieldManager; a missing workload is a no-op.
+	existing := obj.DeepCopy()
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return c.Patch(ctx, obj, client.Apply, client.FieldOwner(StampFieldManager))
+}
+
+// ObjectStamp returns the workload OBJECT metadata config-sha annotation
+// (rollout: none stamp location), or "" if absent / unreadable.
+func ObjectStamp(ctx context.Context, c client.Client, kind, ns, name string) (string, error) {
+	obj, err := stampObject(kind, ns, name)
+	if err != nil {
+		return "", err
+	}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, obj); err != nil {
+		return "", err
+	}
+	return obj.GetAnnotations()[kohenv1alpha1.AnnotationConfigSHA], nil
+}
+
+func stampObject(kind, ns, name string) (*unstructured.Unstructured, error) {
 	var gvk schema.GroupVersionKind
 	switch kind {
 	case "Deployment":
@@ -171,12 +215,11 @@ func StampNoRestart(ctx context.Context, c client.Client, kind, ns, name, versio
 	case "StatefulSet":
 		gvk = appsv1.SchemeGroupVersion.WithKind("StatefulSet")
 	default:
-		return fmt.Errorf("unsupported workload kind %q", kind)
+		return nil, fmt.Errorf("unsupported workload kind %q", kind)
 	}
 	obj := &unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetGroupVersionKind(gvk)
 	obj.SetNamespace(ns)
 	obj.SetName(name)
-	obj.SetAnnotations(map[string]string{kohenv1alpha1.AnnotationConfigSHA: version})
-	return c.Patch(ctx, obj, client.Apply, client.FieldOwner(StampFieldManager))
+	return obj, nil
 }

@@ -142,6 +142,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	// Credentials (R-AUTH.6, R8.3).
 	cred, err := r.loadCredential(ctx, cs)
 	if err != nil {
+		metrics.FetchErrors.WithLabelValues(kohenv1alpha1.ReasonAuthFailed).Inc()
 		setCondition(cs, kohenv1alpha1.ConditionFetched, metav1.ConditionFalse, kohenv1alpha1.ReasonAuthFailed, r.redactMsg(err.Error()))
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "credential error")
 		r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonAuthFailed, err.Error())
@@ -190,6 +191,7 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	cmName := cs.Spec.ConfigMapName()
 	if err := r.Applier.Apply(ctx, cs, buildConfigMap(cs, cmName, rendered)); err != nil {
 		reason := applyConditionReason(err)
+		metrics.ApplyTotal.WithLabelValues("error").Inc()
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		if reason == string(apply.ReasonAlreadyExistsNotOwned) {
@@ -197,10 +199,17 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 		}
 		return ctrl.Result{}, err
 	}
+	metrics.ApplyTotal.WithLabelValues("success").Inc()
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}, cmName); err != nil {
+		metrics.PruneTotal.WithLabelValues("error").Inc()
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
+		r.event(cs, corev1.EventTypeWarning, "PruneFailed", err.Error())
 		return ctrl.Result{}, err
 	}
+	metrics.PruneTotal.WithLabelValues("success").Inc()
+	// Success apply/prune are continuous every reconcile; surface them via
+	// metrics + conditions. Events fire on failures, stamps/rollouts, secret
+	// resolution transitions, and finalizer cleanup (R13.4) to avoid spam.
 
 	// Apply-if-present secret manifests (ExternalSecrets) from git, owned +
 	// pruned and subject to the guard rails (§8.2, R8.8, R-AUTH.4). This
@@ -221,14 +230,23 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 	now := time.Now()
 	priorSecretsReason := conditionReason(cs, kohenv1alpha1.ConditionSecretsReady)
 	decision := r.resolveSecrets(ctx, cs, now)
+	newSecretsReason := conditionReason(cs, kohenv1alpha1.ConditionSecretsReady)
+	if newSecretsReason != priorSecretsReason {
+		// R13.4: emit an event on every SecretsReady reason transition.
+		evtType := corev1.EventTypeNormal
+		if !decision.AllReady {
+			evtType = corev1.EventTypeWarning
+		}
+		r.event(cs, evtType, newSecretsReason, decision.Message)
+	}
 	if !decision.AllReady {
 		if decision.MaxDegradedExceeded && priorSecretsReason != kohenv1alpha1.ReasonMaxDegradedExceeded {
-			// Fire the security-visible signal once, on entry to the state
-			// (R8.11), not on every requeue while it persists.
+			// Count once on entry to the state (R8.11). The transition event
+			// above already covers the user-visible signal.
 			metrics.MaxDegradedExceededTotal.Inc()
-			r.event(cs, corev1.EventTypeWarning, kohenv1alpha1.ReasonMaxDegradedExceeded, decision.Message)
 		}
 		// Keep last-good: do not wire secret surfaces or stamp the new version.
+		cs.Status.RolloutInProgress = false
 		r.setReady(cs, metav1.ConditionFalse, decision.ReadyReason, r.redactMsg(decision.Message))
 		return ctrl.Result{RequeueAfter: progressingRequeue}, nil
 	}
@@ -259,6 +277,11 @@ func (r *ConfigSyncReconciler) sync(ctx context.Context, cs *kohenv1alpha1.Confi
 // wireAndStamp wires the workload and stamps the version per rollout mode,
 // setting WorkloadWired and RolloutComplete. Returns whether the rollout is
 // complete. Object sync continues even when the workload cannot be wired.
+//
+// When the desired version already matches the stamp, this function performs
+// **no workload write** (R-ROLLOUT.2, T3, A3): rollout:auto skips Wire entirely;
+// rollout:none still wires mounts (no pod-template stamp) but skips StampNoRestart
+// when the object annotation already matches.
 func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alpha1.ConfigSync, cmName, version string) bool {
 	kind := cs.Spec.WorkloadRef.Kind
 	ns := cs.Namespace
@@ -271,6 +294,8 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	currentStamp, reason, msg, ok := r.inspectWorkload(ctx, kind, ns, name, podTemplateRollout)
 	if !ok {
 		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, r.redactMsg(msg))
+		cs.Status.RolloutInProgress = false
+		metrics.WireErrors.WithLabelValues(knownWireReason(reason)).Inc()
 		r.event(cs, corev1.EventTypeWarning, reason, msg)
 		return false
 	}
@@ -288,35 +313,73 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 		SecretFiles: files,
 		SecretEnv:   envs,
 	}
-	if cs.Spec.Rollout != kohenv1alpha1.RolloutNone {
-		spec.ConfigSHA = version // auto: stamp the pod template (triggers rollout)
+
+	if cs.Spec.Rollout == kohenv1alpha1.RolloutNone {
+		if err := r.Wirer.Wire(ctx, spec); err != nil {
+			reason := wireConditionReason(err)
+			setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, r.redactMsg(err.Error()))
+			cs.Status.RolloutInProgress = false
+			metrics.WireErrors.WithLabelValues(knownWireReason(reason)).Inc()
+			r.event(cs, corev1.EventTypeWarning, reason, err.Error())
+			return false
+		}
+		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionTrue, kohenv1alpha1.ReasonSynced, "owned fields merged")
+
+		objStamp, err := rollout.ObjectStamp(ctx, r.Client, kind, ns, name)
+		if err != nil {
+			setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
+			cs.Status.RolloutInProgress = false
+			return false
+		}
+		if objStamp != version {
+			if err := rollout.StampNoRestart(ctx, r.Client, kind, ns, name, version); err != nil {
+				setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
+				cs.Status.RolloutInProgress = false
+				return false
+			}
+			r.event(cs, corev1.EventTypeNormal, "Stamped", "config version "+version+" stamped (rollout: none)")
+		} else {
+			metrics.RolloutsSkipped.Inc()
+		}
+		cs.Status.WorkloadVersion = version
+		cs.Status.RolloutInProgress = false
+		setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionTrue, kohenv1alpha1.ReasonSynced, "rollout disabled (none)")
+		return true
 	}
+
+	// rollout: auto — skip the workload write when the stamp already matches
+	// (R-ROLLOUT.2 / T3 / A3). Still poll rollout progress for status.
+	if currentStamp == version {
+		metrics.RolloutsSkipped.Inc()
+		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionTrue, kohenv1alpha1.ReasonSynced, "owned fields merged")
+		cs.Status.WorkloadVersion = version
+		p := r.rolloutProgress(ctx, kind, ns, name)
+		status := metav1.ConditionFalse
+		if p.Complete {
+			status = metav1.ConditionTrue
+		}
+		setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, status, p.Reason, p.Message)
+		cs.Status.RolloutInProgress = !p.Complete
+		if p.Reason == kohenv1alpha1.ReasonProgressDeadlineExceeded {
+			metrics.ProgressDeadlineExceeded.Inc()
+		}
+		return p.Complete
+	}
+
+	spec.ConfigSHA = version // auto: stamp the pod template (triggers rollout)
 	if err := r.Wirer.Wire(ctx, spec); err != nil {
 		reason := wireConditionReason(err)
 		setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionFalse, reason, r.redactMsg(err.Error()))
+		cs.Status.RolloutInProgress = false
+		metrics.WireErrors.WithLabelValues(knownWireReason(reason)).Inc()
 		r.event(cs, corev1.EventTypeWarning, reason, err.Error())
 		return false
 	}
 	setCondition(cs, kohenv1alpha1.ConditionWorkloadWired, metav1.ConditionTrue, kohenv1alpha1.ReasonSynced, "owned fields merged")
 
-	if cs.Spec.Rollout == kohenv1alpha1.RolloutNone {
-		if err := rollout.StampNoRestart(ctx, r.Client, kind, ns, name, version); err != nil {
-			setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, r.redactMsg(err.Error()))
-			return false
-		}
-		cs.Status.WorkloadVersion = version
-		setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, metav1.ConditionTrue, kohenv1alpha1.ReasonSynced, "rollout disabled (none)")
-		return true
-	}
-
 	cs.Status.WorkloadVersion = version
-	// Rollout triggered vs skipped-on-match (R-ROLLOUT.2, R13.1).
-	if currentStamp == version {
-		metrics.RolloutsSkipped.Inc()
-	} else {
-		metrics.RolloutsTriggered.Inc()
-		r.event(cs, corev1.EventTypeNormal, "RolloutTriggered", "config version "+version+" stamped")
-	}
+	metrics.RolloutsTriggered.Inc()
+	r.event(cs, corev1.EventTypeNormal, "RolloutTriggered", "config version "+version+" stamped")
 	p := r.rolloutProgress(ctx, kind, ns, name)
 	status := metav1.ConditionFalse
 	if p.Complete {
@@ -324,6 +387,9 @@ func (r *ConfigSyncReconciler) wireAndStamp(ctx context.Context, cs *kohenv1alph
 	}
 	setCondition(cs, kohenv1alpha1.ConditionRolloutComplete, status, p.Reason, p.Message)
 	cs.Status.RolloutInProgress = !p.Complete
+	if p.Reason == kohenv1alpha1.ReasonProgressDeadlineExceeded {
+		metrics.ProgressDeadlineExceeded.Inc()
+	}
 	return p.Complete
 }
 
@@ -398,14 +464,24 @@ func (r *ConfigSyncReconciler) finalize(ctx context.Context, cs *kohenv1alpha1.C
 	// never wired) must NOT unwire — that would retract the incumbent's fields on
 	// the shared workload (H-A / R-WIRE.6, R-SINGLETON).
 	if _, conflict := r.singletonConflict(ctx, cs); !conflict {
-		if err := r.Wirer.Unwire(ctx, cs.Spec.WorkloadRef.Kind, cs.Namespace, cs.Spec.WorkloadRef.Name); err != nil {
+		kind := cs.Spec.WorkloadRef.Kind
+		ns := cs.Namespace
+		name := cs.Spec.WorkloadRef.Name
+		if err := r.Wirer.Unwire(ctx, kind, ns, name); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Unwire uses field manager "kohen" and cannot retract the object-level
+		// stamp owned by "kohen-stamp" (rollout: none). Clear it explicitly.
+		if err := rollout.ClearStamp(ctx, r.Client, kind, ns, name); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.event(cs, corev1.EventTypeNormal, "Unwired", "retracted owned workload fields and stamps")
 	}
 	// Prune is owner-scoped, so it only removes this sync's own ConfigMaps.
 	if err := r.Applier.Prune(ctx, cs, &corev1.ConfigMapList{}); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.event(cs, corev1.EventTypeNormal, "Pruned", "removed owned ConfigMaps")
 	// Prune this sync's applied secret manifests (ExternalSecrets), across the
 	// candidate API versions (R8.8, R-WIRE.6). ESO deletes the target Secret it
 	// created when the ExternalSecret is removed.
@@ -468,6 +544,12 @@ func (r *ConfigSyncReconciler) computeReady(cs *kohenv1alpha1.ConfigSync) {
 		}
 	}
 	if !conditionTrue(cs, kohenv1alpha1.ConditionRolloutComplete) {
+		// A stuck rollout (ProgressDeadlineExceeded) is degraded, not merely
+		// progressing — so the degraded gauge reflects it (R10.2, R13.1).
+		if conditionReason(cs, kohenv1alpha1.ConditionRolloutComplete) == kohenv1alpha1.ReasonProgressDeadlineExceeded {
+			r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonDegraded, "rollout progress deadline exceeded")
+			return
+		}
 		r.setReady(cs, metav1.ConditionFalse, kohenv1alpha1.ReasonProgressing, "rollout in progress")
 		return
 	}

@@ -11,15 +11,24 @@ Kohen follows [Semantic Versioning](https://semver.org/):
 The Helm chart `version` tracks chart packaging changes; `appVersion` tracks the
 operator image.
 
+### Product SemVer vs API version
+
+- **Product** releases follow SemVer (`v1.0.0`, chart `version` / `appVersion`).
+- The served CRD API in v1.0.x is **`kohen.dev/v1alpha1`**. That is intentional:
+  the alpha API version signals that a future `v1beta1`/`v1` may introduce
+  conversion. Within `1.0.x`, compatible field additions are preferred over
+  breaks.
+
 ### CRD upgrade policy
 
 - CRD changes ship in the Helm chart `crds/` directory and the plain manifest
-  bundle.
+  bundles (`kohen.yaml` cluster-scope, `kohen-namespaced.yaml` namespaced).
 - **Compatible changes** (new optional fields, additional validation) apply with
   `helm upgrade` or `kubectl apply`.
 - **Breaking changes** require a new API version (`v1beta1`, etc.) with a
   conversion webhook — not expected in v1.0.x.
-- Always review the release notes before upgrading across minor versions.
+- Always review the [CHANGELOG](../CHANGELOG.md) / release notes before upgrading
+  across minor versions.
 
 ## Helm upgrade
 
@@ -39,7 +48,7 @@ To pin a specific image:
 helm upgrade kohen deploy/helm/kohen \
   --namespace kohen-system \
   --reuse-values \
-  --set image.tag=0.1.0 \
+  --set image.tag=1.0.0 \
   --wait
 ```
 
@@ -82,7 +91,15 @@ kubectl delete configsync <name> -n <namespace>
 
 ## Releases
 
-Tagged releases publish container images and Helm charts via the
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) workflow.
+Tagged releases (`v*`) publish via
+[`.github/workflows/release.yml`](../.github/workflows/release.yml):
+
+- Multi-arch operator image (`linux/amd64`, `linux/arm64`) to GHCR, with SBOM
+- Cosign keyless signature (hard-fail — unsigned images do not ship)
+- Helm chart pushed to `oci://ghcr.io/<owner>/charts`
+- GitHub Release artifacts: chart `.tgz`, `kohen.yaml`, `kohen-namespaced.yaml`
+
+The project site is published from [`site/`](../site/) via
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
 Release artifacts include an SPDX SBOM and cosign signatures when signing
 credentials are configured.

@@ -31,11 +31,14 @@ whenever the config changes — version-matched across the fleet.
 - [Troubleshooting](./docs/troubleshooting.md) — symptom → condition → action.
 - [Security hardening](./docs/security.md) — threat model, RBAC, allow-lists.
 - [Upgrade & uninstall](./docs/upgrade-uninstall.md) — SemVer, CRD policy, A12.
+- [v1.0 delivery plan](./docs/reviews/v1.0-delivery-plan.md) — gap decisions for the release.
+- [Project site](https://ozimakov.github.io/kohen/) — landing page and docs index.
 
-> **Status:** Phases 0–2 and **Phase 3 (ship readiness)** are implemented.
-> The [U3 acceptance gate](./.github/workflows/u3.yml) automates criteria
-> **A1–A12** on `kind` (two Kubernetes minors, Helm + plain manifests).
-> `spec.secretRefs` supports `externalSecret` and `nativeSecret` backends.
+> **Status:** **v1.0** — Phases 0–3 and the [U3 acceptance gate](./.github/workflows/u3.yml)
+> (**A1–A12** on `kind`, two Kubernetes minors × Helm + plain manifests) are the
+> shipping bar. API group/version remains `kohen.dev/v1alpha1` (see
+> [upgrade notes](./docs/upgrade-uninstall.md)). `spec.secretRefs` supports
+> `externalSecret` and `nativeSecret` backends.
 
 ---
 
@@ -46,7 +49,7 @@ your config, wires it into the workload, and gives you version-matched rollouts.
 
 ### Prerequisites
 
-- A Kubernetes cluster (v1.29+) and `kubectl`.
+- A Kubernetes cluster (v1.28+) and `kubectl`.
 - `helm` v3.13+.
 - A git repository containing your config files under some path, reachable from
   the cluster.
@@ -140,7 +143,9 @@ Every feature currently shipped.
 | `wiring.mountPath` | string | `/etc/kohen/config` | Mount path for the config volume. Never uses `subPath` (so live updates work). |
 | `rollout` | `auto` \| `none` | `auto` | See [rollout modes](#rollout-modes). |
 | `sync.interval` | duration | `30s` | Polling interval between reconciles. |
-| `secretRefs[]` | list | — | Secrets the config references, surfaced as files or env vars. See [secret references](#secret-references). |
+| `secretRefs[]` | list (max 32) | — | Secrets the config references, surfaced as files or env vars. See [secret references](#secret-references). |
+| `secretRefs[].name` | DNS-1123 ≤50 | — | Stable reference name (status/events key). |
+| `secretRefs[].surface.rolloutOnRotate` | bool | `true` | When `surface.as=env`, whether secret rotation advances the config version and rolls the workload. Ignored for `as: file` (kubelet delivers in place). |
 
 The rendered file tree maps to `ConfigMap` keys; `/` in a nested file name maps
 to `__` in the key. Rendering fails closed if the result exceeds the ~1 MiB
@@ -153,10 +158,11 @@ backends are supported: `externalSecret` (an External Secrets Operator
 `ExternalSecret`, applied from git and awaited) and `nativeSecret` (a
 pre-existing `Secret`). Each is surfaced as a `file` (mounted volume, live
 in-place updates) or `env` (a `valueFrom.secretKeyRef` entry, rotation rolls the
-workload). Kohen never reads the secret value; the readiness policy fails closed
-on first resolution and fails safe (last-good) on a transient outage. See the
-full [secret integration guide](./docs/secrets.md) for schema, rotation, guard
-rails, and the Vault-via-ESO decision tree.
+workload unless `rolloutOnRotate: false`). Kohen never reads the secret value;
+the readiness policy fails closed on first resolution and fails safe (last-good)
+on a transient outage. Rotation is detected on the sync poll interval (≤
+`sync.interval`). See the full [secret integration guide](./docs/secrets.md) for
+schema, rotation, guard rails, and the Vault-via-ESO decision tree.
 
 ```yaml
 spec:
@@ -164,7 +170,11 @@ spec:
     - name: db                # native Secret, as an env var
       backend: nativeSecret
       nativeSecret: { name: checkout-db }
-      surface: { as: env, envVar: DB_PASSWORD, key: password }
+      surface:
+        as: env
+        envVar: DB_PASSWORD
+        key: password
+        rolloutOnRotate: true   # default; set false to skip rollout on env rotation
     - name: api               # ESO ExternalSecret (committed to git), as a file
       backend: externalSecret
       externalSecret: { name: checkout-api }
@@ -229,11 +239,12 @@ unspecified, or multicast addresses, and re-screens every HTTP redirect hop
 
 ### Status & conditions
 
-`status` exposes `sourceCommit`, `configVersion`, `workloadVersion`,
-`rolloutInProgress`, per-reference `secretRefs`, and per-step conditions:
-`Fetched`, `Rendered`, `ManifestsApplied`, `SecretsReady`, `WorkloadWired`,
-`RolloutComplete`, and the overall `Ready`. Common failure reasons and the first
-action to take:
+`status` exposes `observedGeneration`, `sourceCommit`, `configVersion`,
+`workloadVersion`, `rolloutInProgress`, per-reference `secretRefs` (including
+sticky `established`), and per-step conditions: `Fetched`, `Rendered`,
+`ManifestsApplied`, `SecretsReady`, `WorkloadWired`, `RolloutComplete`, and the
+overall `Ready`. Short name: `kubectl get cs`. Common failure reasons and the
+first action to take:
 
 | Reason | Condition | First action |
 | --- | --- | --- |

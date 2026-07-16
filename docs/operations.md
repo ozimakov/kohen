@@ -22,10 +22,12 @@ Key status fields:
 
 | Field | Meaning |
 | --- | --- |
+| `status.observedGeneration` | Last reconciled `.metadata.generation` |
 | `status.sourceCommit` | Plain git SHA |
 | `status.configVersion` | Desired rollout identity |
 | `status.workloadVersion` | Stamped version on the workload |
 | `status.rolloutInProgress` | Rolling update in flight |
+| `status.secretRefs[].established` | Sticky: reference was resolved as part of a wired version (fail-safe eligibility) |
 
 Correlate with the workload annotation:
 
@@ -75,6 +77,21 @@ A second `ConfigSync` targeting the same `workloadRef` degrades with
 
 The operator exposes Prometheus metrics on port 8080 and health endpoints on
 8081 (`/healthz`, `/readyz`). See the Helm `metrics.service` values.
+
+## Operator footprint (T6 / NFR3)
+
+Default chart requests/limits (single replica):
+
+| Resource | Request | Limit |
+| --- | --- | --- |
+| CPU | `50m` | `500m` |
+| Memory | `64Mi` | `256Mi` |
+
+Scale envelope (NFR3): **hundreds** of `ConfigSync`es per operator instance is
+the design target. Secret informers are label-restricted to git credentials to
+keep memory bounded; secret rotation for referenced Secrets is poll-bounded
+(≤ `sync.interval`). Size the operator up if you run many syncs with large
+rendered ConfigMaps or frequent git fetches.
 
 ## Troubleshooting
 

@@ -131,6 +131,21 @@ func wireConditionReason(err error) string {
 	return kohenv1alpha1.ReasonDegraded
 }
 
+// knownWireReason bounds the WireErrors metric label to the §11.4 WorkloadWired
+// reason set (plus a catch-all) so arbitrary strings cannot inflate cardinality.
+func knownWireReason(reason string) string {
+	switch reason {
+	case kohenv1alpha1.ReasonWorkloadNotFound,
+		kohenv1alpha1.ReasonUnsupportedStrategy,
+		kohenv1alpha1.ReasonApplyConflict,
+		kohenv1alpha1.ReasonSingletonViolation,
+		kohenv1alpha1.ReasonDegraded:
+		return reason
+	default:
+		return "Other"
+	}
+}
+
 // applyConditionReason maps an apply error to a reason string.
 func applyConditionReason(err error) string {
 	if reason, ok := apply.ReasonOf(err); ok {

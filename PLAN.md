@@ -1,16 +1,19 @@
 # KOHEN — Implementation Plan (to v1.0)
 
-> Companion to [`SPEC.md`](./SPEC.md) (Draft v0.6). This plan sequences the work
-> from an empty repo to a **v1.0** operator. It is written so that **each step
-> can be picked up and delivered independently by a separate agent**: every step
-> lists its dependencies, scope, deliverables, tests, and a self-contained
-> Definition of Done, and references the SPEC requirements it satisfies.
+> Companion to [`SPEC.md`](./SPEC.md) (**v1.0**). This plan sequenced the work
+> from an empty repo to a **v1.0** operator. Phases 0–3 and U1–U3 are complete;
+> remaining cut work is tracked in
+> [`docs/reviews/v1.0-delivery-plan.md`](./docs/reviews/v1.0-delivery-plan.md).
+> It is written so that **each step can be picked up and delivered independently
+> by a separate agent**: every step lists its dependencies, scope, deliverables,
+> tests, and a self-contained Definition of Done, and references the SPEC
+> requirements it satisfies.
 >
 > Usability testing (real-cluster, end-to-end, `kind`-based) is called out as its
 > **own milestones** (`U1`–`U3`), separate from the unit/integration testing that
 > lives inside each build step.
 >
-> **v1 scope (per SPEC v0.6):** secret backends are **ESO + native `Secret`**
+> **v1 scope (per SPEC v1.0):** secret backends are **ESO + native `Secret`**
 > only; `ConfigSync` is the only config surface; no CLI/webhooks/overlay/
 > splitting/DaemonSet in v1 — see the [post-1.0 backlog](#post-10-backlog).
 
