@@ -104,17 +104,30 @@ Tagged releases (`v*`) publish via
 
 ### Cut a release
 
+Publishing is driven by a **GitHub Release** (not a bare tag push). Creating /
+publishing the release runs [`.github/workflows/release.yml`](../.github/workflows/release.yml),
+which builds the image, pushes the chart, signs artifacts, and **attaches**
+files to that same release.
+
 ```bash
 # 1) Rehearse packaging (Actions → Release → dry_run=true), or locally:
 make release-package VERSION=1.0.0-rc.1
 
-# 2) Tag and push (triggers the full publish path):
-git tag -a v1.0.0-rc.1 -m "v1.0.0-rc.1"
-git push origin v1.0.0-rc.1
+# 2) Publish a GitHub Release for the tag (UI or CLI). Example with gh:
+git checkout main && git pull
+gh release create v1.0.0-rc.1 \
+  --title "v1.0.0-rc.1" \
+  --notes-file dist/release-notes.md \
+  --prerelease \
+  --target main
+# → triggers the Release workflow; assets appear on the release when it finishes.
 ```
 
-Prerelease tags (`v1.0.0-rc.1`, `-alpha`, `-beta`) create a GitHub **prerelease**
-and do **not** move `:latest`.
+Or in the GitHub UI: **Releases → Draft a new release →** choose/create tag
+`v1.0.0-rc.1` → **Publish release**.
+
+Prerelease releases (checkbox or `--prerelease`, or SemVer pre-release tags
+like `-rc.1`) do **not** move the image `:latest` tag.
 
 After the first publish, make the GHCR packages **public** if anonymous pulls
 should work: Package settings → Change visibility → Public

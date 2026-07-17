@@ -1,15 +1,16 @@
-# SemVer release pipeline (PLAN S3.3 / NFR10):
-# tag vX.Y.Z → multi-arch image + SBOM + cosign (by digest) + Helm OCI chart +
-# pinned manifest bundles + checksums + GitHub Release.
+# SemVer release pipeline (PLAN S3.3 / NFR10).
+#
+# Primary trigger: publish a GitHub Release (UI / `gh release create`).
+# That event supplies the tag; this workflow builds, pushes, signs, and
+# attaches artifacts to THAT release.
 #
 # Rehearse packaging without publishing:
 #   Actions → Release → Run workflow → version=1.0.0-rc.1, dry_run=true
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -17,7 +18,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: 'Package only — do not push image/chart or create a GitHub Release'
+        description: 'Package only — do not push image/chart or upload release assets'
         required: false
         type: boolean
         default: true
@@ -29,7 +30,8 @@ permissions:
   attestations: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  # One publish at a time per tag / dispatch run.
+  group: release-${{ github.event.release.tag_name || inputs.version || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -41,27 +43,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Release events check out the tag commit; fetch history for notes.
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || github.sha }}
 
       - name: Resolve version
         id: meta
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            RAW="${{ inputs.version }}"
-            DRY_RUN="${{ inputs.dry_run }}"
-          else
-            RAW="${GITHUB_REF_NAME}"
-            DRY_RUN="false"
-          fi
+          case "${{ github.event_name }}" in
+            release)
+              RAW="${{ github.event.release.tag_name }}"
+              DRY_RUN="false"
+              # Honor the Release UI prerelease checkbox when set.
+              UI_PRE="${{ github.event.release.prerelease }}"
+              ;;
+            workflow_dispatch)
+              RAW="${{ inputs.version }}"
+              DRY_RUN="${{ inputs.dry_run }}"
+              UI_PRE=""
+              ;;
+            *)
+              echo "error: unsupported event ${{ github.event_name }}" >&2
+              exit 1
+              ;;
+          esac
           eval "$(bash scripts/validate-release-tag.sh "${RAW}")"
+          # Prefer the GitHub Release prerelease flag when present.
+          if [[ "${UI_PRE}" == "true" ]]; then
+            prerelease=true
+          elif [[ "${UI_PRE}" == "false" ]]; then
+            prerelease=false
+          fi
           {
             echo "version=${version}"
+            echo "tag=v${version}"
             echo "prerelease=${prerelease}"
             echo "dry_run=${DRY_RUN}"
             echo "commit=$(git rev-parse --short=12 HEAD)"
           } | tee -a "$GITHUB_OUTPUT"
-          echo "Resolved version=${version} prerelease=${prerelease} dry_run=${DRY_RUN}"
+          echo "Resolved version=${version} tag=v${version} prerelease=${prerelease} dry_run=${DRY_RUN}"
 
       - uses: azure/setup-helm@v4
         with:
@@ -161,16 +182,34 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${{ env.IMAGE }}/charts/kohen:${{ steps.meta.outputs.version }}"
 
-      - name: Create GitHub Release
-        if: steps.meta.outputs.dry_run != 'true'
+      - name: Attach artifacts to GitHub Release
+        if: steps.meta.outputs.dry_run != 'true' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.meta.outputs.version }}
-          name: v${{ steps.meta.outputs.version }}
+          # Target the release that triggered this run (do not create a new one).
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/*.tgz
+            dist/manifests/kohen.yaml
+            dist/manifests/kohen-namespaced.yaml
+            dist/SHA256SUMS
+          # Keep any notes written in the Release UI; append install blurb.
+          append_body: true
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+
+      - name: Create GitHub Release (dispatch publish only)
+        # workflow_dispatch with dry_run=false: create/update the release for the tag.
+        if: steps.meta.outputs.dry_run != 'true' && github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
           body_path: dist/release-notes.md
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             dist/*.tgz
             dist/manifests/kohen.yaml
