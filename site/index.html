@@ -32,7 +32,7 @@
         </p>
         <div class="cta-row">
           <a class="btn primary" href="docs.html#intro">What is Kohen</a>
-          <a class="btn ghost" href="https://github.com/ozimakov/kohen#getting-started">Getting started</a>
+          <a class="btn ghost" href="https://github.com/ozimakov/kohen/blob/main/docs/getting-started-and-gitops.md">Getting started</a>
         </div>
       </div>
       <div class="hero-visual" aria-hidden="true">
@@ -68,19 +68,16 @@
       <h2>The pattern</h2>
       <p>
         Keep domain and environment config in a dedicated git repo. Deploy the app with GitOps.
-        Kohen bridges the two: fetch path → render ConfigMap → mount → stamp → roll.
+        Kohen bridges the two: path → ConfigMap → mount → stamp → roll.
       </p>
-      <pre class="diagram" aria-label="Config repo to workload flow">config repo                         cluster
-(domain / env config)               ┌─────────────────────────────────┐
-                                    │                                 │
-services/checkout/prod/  ──fetch──▶ │  Kohen                          │
-  app.yaml                          │    │                            │
-  feature.toml                      │    ├─▶ ConfigMap (rendered)     │
-                                    │    ├─▶ mount into Deployment    │
-                                    │    └─▶ stamp + rolling update   │
-                                    │                                 │
-deploy repo / GitOps ──deploy──▶    │  Deployment (checkout)          │
-                                    └─────────────────────────────────┘</pre>
+      <pre class="diagram" aria-label="Config repo to workload flow">Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘</pre>
     </section>
 
     <section class="strip alt" id="when">
@@ -91,14 +88,7 @@ deploy repo / GitOps ──deploy──▶    │  Deployment (checkout)        
         ConfigMap from the same repo, or when you only need secrets or restart-on-change.
       </p>
       <p>
-        <a href="https://github.com/ozimakov/kohen/blob/main/docs/intro.md">Full decision table →</a>
-      </p>
-    </section>
-
-    <section class="strip" id="install">
-      <h2>Install</h2>
-      <p class="mono">
-        helm install kohen oci://ghcr.io/ozimakov/kohen/charts/kohen --version 1.0.0
+        <a href="docs.html#when">Decision table →</a>
       </p>
     </section>
   </main>

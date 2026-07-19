@@ -3,57 +3,34 @@
 Kohen is a Kubernetes operator for one pattern: **an application that consumes
 domain-specific configuration from a dedicated git repository**.
 
-Point a `ConfigSync` at a git repo path and a workload. Kohen renders that path
-into a `ConfigMap`, mounts it, and rolls the workload when the config version
-changes — version-matched across the fleet.
+Point a `ConfigSync` at a git path and a workload. Kohen renders a `ConfigMap`,
+mounts it, and rolls the workload when the config version changes.
 
-Kohen is **not** a GitOps replacement. Use Argo CD / Flux to deploy **what**
-runs; use Kohen to keep a running workload's **config** in sync with a dedicated
-config repo. See **[What is Kohen](./docs/intro.md)** for the pattern, a
-diagram, and when (not) to use it.
+Deploy **what** runs with Argo CD / Flux; keep **config** in sync with Kohen.
 
 ```text
-  config repo                         cluster
-  (domain / env config)               ┌─────────────────────────────────┐
-                                      │                                 │
-  services/checkout/prod/  ──fetch──▶ │  Kohen                          │
-    app.yaml                          │    │                            │
-    feature.toml                      │    ├─▶ ConfigMap (rendered)     │
-                                      │    ├─▶ mount into Deployment    │
-                                      │    └─▶ stamp + rolling update   │
-                                      │                                 │
-  deploy repo / GitOps ──deploy──▶    │  Deployment (checkout)          │
-                                      └─────────────────────────────────┘
+Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘
 ```
 
-### When to use Kohen — and when not
-
-| Scenario | Use Kohen? | Notes |
-| --- | --- | --- |
-| Dedicated config repo drives a workload's `ConfigMap` + secret wiring + rollouts | **Yes** | Core use case |
-| GitOps deploys the app; config lives in a **separate** config repo | **Yes** | Apply [GitOps ignore rules](#gitops-coexistence) |
-| GitOps already renders the app **and** its `ConfigMap` from the same repo | No | A second reconciler adds no value |
-| Config exceeds `ConfigMap` size (~1 MiB) or is a large file tree | No | Prefer a `git-sync`-to-volume pattern |
-| You only need secrets from an external store | No | Use External Secrets Operator directly |
-| You hand-author a `ConfigMap` and only want restart-on-change | No | Reloader (or similar) is enough |
-| You want product feature toggles / experiments in code | No | Use a feature-flag platform |
+**[What is Kohen / when to use it →](./docs/intro.md)**
 
 ## Documentation
 
-- **[What is Kohen](./docs/intro.md)** — positioning, pattern, when to use
-- [Install](./docs/install.md) — Helm and plain manifests, both RBAC scopes
-- [Getting Started & GitOps](./docs/getting-started-and-gitops.md) — Day-1 walkthrough on `kind`
-- [Concepts](./docs/concepts.md) — architecture, reconcile flow, consistency
-- [Secrets (ESO + native)](./docs/secrets.md)
-- [Operations](./docs/operations.md) · [Troubleshooting](./docs/troubleshooting.md)
-- [Security](./docs/security.md) · [Upgrade & uninstall](./docs/upgrade-uninstall.md)
-- [Specification](./SPEC.md) — behavioral contract and acceptance criteria
+- [Install](./docs/install.md) — Helm and plain manifests
+- [Getting Started & GitOps](./docs/getting-started-and-gitops.md) — Day-1 runbook
+- [Concepts](./docs/concepts.md) · [Secrets](./docs/secrets.md) · [Operations](./docs/operations.md)
+- [Troubleshooting](./docs/troubleshooting.md) · [Security](./docs/security.md) · [Upgrade](./docs/upgrade-uninstall.md)
+- [Specification](./SPEC.md) — behavioral contract
 - [Project site](https://ozimakov.github.io/kohen/)
 
-> **Status:** **v1.0** — acceptance suite A1–A12 on `kind` (see
-> [`.github/workflows/u3.yml`](./.github/workflows/u3.yml)). API group remains
-> `kohen.dev/v1alpha1` ([upgrade notes](./docs/upgrade-uninstall.md)).
-> `spec.secretRefs` supports `externalSecret` and `nativeSecret`.
+> **v1.0** · API `kohen.dev/v1alpha1` · see [upgrade notes](./docs/upgrade-uninstall.md)
 
 ---
 

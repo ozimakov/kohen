@@ -3,33 +3,29 @@
 Kohen is a Kubernetes operator for one pattern: **an application that consumes
 domain-specific configuration from a dedicated git repository**.
 
-You keep app config (and its secret wiring) in a reviewable, multi-environment
-config repo — separate from the deployment repo. Kohen syncs a path from that
-repo into a `ConfigMap`, mounts it into the workload, and rolls the workload
-when the config version changes.
+Config (and its secret wiring) lives in a reviewable, multi-environment config
+repo — separate from the deployment repo. Kohen syncs a path from that repo into
+a `ConfigMap`, mounts it into the workload, and rolls the workload when the
+config version changes.
 
-It is **not** a GitOps control plane. Use Argo CD / Flux to deploy **what**
-runs; use Kohen to keep a running workload's **config** in sync with the config
-repo.
+It is **not** a GitOps control plane. Deploy **what** runs with Argo CD / Flux;
+keep **config** in sync with Kohen.
 
 ## The main pattern
 
 ```text
-  config repo                         cluster
-  (domain / env config)               ┌─────────────────────────────────┐
-                                      │                                 │
-  services/checkout/prod/  ──fetch──▶ │  Kohen                          │
-    app.yaml                          │    │                            │
-    feature.toml                      │    ├─▶ ConfigMap (rendered)     │
-                                      │    ├─▶ mount into Deployment    │
-                                      │    └─▶ stamp + rolling update   │
-                                      │                                 │
-  deploy repo / GitOps ──deploy──▶    │  Deployment (checkout)          │
-                                      └─────────────────────────────────┘
+Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘
 ```
 
-In one `ConfigSync` you declare: **repo + path + workload**. Kohen does the
-rest — render, wire, version-stamp, and roll once when the version changes.
+One `ConfigSync` declares **repo + path + workload**. Kohen renders, wires,
+stamps a version, and rolls once when that version changes.
 
 ```yaml
 apiVersion: kohen.dev/v1alpha1
@@ -61,6 +57,6 @@ spec:
 
 ## Next steps
 
-- [Install](./install.md)
-- [Getting started & GitOps](./getting-started-and-gitops.md)
-- [Concepts](./concepts.md)
+1. [Install](./install.md)
+2. [Getting started & GitOps](./getting-started-and-gitops.md)
+3. [Concepts](./concepts.md)

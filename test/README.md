@@ -38,7 +38,17 @@ unit and integration tests live next to the code they cover.
 | --- | --- |
 | `make e2e` | Config sync & rollout |
 | `make e2e-secrets` | Secret integration (requires ESO) |
-| `make e2e-acceptance` | Full A1–A12 acceptance gate |
+| `make e2e-security` | Pod/RBAC conformance (A9) |
+| `make e2e-acceptance` | Mount-content + matrix checks (A2) |
+| `make e2e-lifecycle` | Upgrade (A12); set `KOHEN_ALLOW_UNINSTALL=true` for uninstall |
+| `make e2e-u3` | Full acceptance gate (all of the above) |
 
 See also [`.github/workflows/e2e.yml`](../.github/workflows/e2e.yml) and
 [`.github/workflows/u3.yml`](../.github/workflows/u3.yml).
+
+### Secret-leak assertions (R8.3 / TM9)
+
+`test/leakcheck` registers known fixture secret values and asserts they never
+appear in status, events, logs, or applied objects. It runs on **every PR** as
+part of `go test ./...` (imported by reconcile package tests). Add a leak scan
+to any new test that flows secret material through status, events, or objects.
