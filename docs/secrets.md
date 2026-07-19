@@ -1,8 +1,8 @@
-# Secret Integration (ESO + native) — U2 guide
+# Secret Integration (ESO + native)
 
 This guide is the verified path for referencing **secrets** from a `ConfigSync`.
 It is exercised end-to-end on `kind` with a real External Secrets Operator
-(`test/e2e`, U2 in [`PLAN.md`](../PLAN.md)) and covers both v1 backends:
+(`test/e2e`) and covers both v1 backends:
 
 - **`externalSecret`** — an [External Secrets Operator](https://external-secrets.io)
   `ExternalSecret` (the recommended path; ESO fetches from Vault/AWS/GCP/…).
@@ -241,8 +241,7 @@ Does the secret already live in a Kubernetes Secret you control the lifecycle of
 
 Rule of thumb: **native** for secrets another in-cluster controller already
 materializes; **ESO** for anything that originates in an external secret manager
-(Vault being the canonical case). Sealed Secrets is a post-1.0 backend
-(`PLAN.md`).
+(Vault being the canonical case). Sealed Secrets is planned for a later release.
 
 ## 9. Troubleshooting
 

@@ -255,13 +255,34 @@ footer code {
   color: var(--mist-dim);
 }
 
-.mono {
+.mono,
+.diagram {
   display: block;
   padding: 0.9rem 1rem;
   border-left: 3px solid var(--brass);
   background: rgba(0, 0, 0, 0.25);
   overflow-x: auto;
   color: var(--mist);
+}
+
+.diagram {
+  margin: 1.25rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  white-space: pre;
+  max-width: 100%;
+}
+
+.strip a {
+  color: var(--sea-bright);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.strip a:hover {
+  border-bottom-color: var(--brass);
+  color: var(--brass-hot);
 }
 
 .docs {
@@ -288,6 +309,58 @@ footer code {
   font-size: 1.45rem;
   margin: 0 0 0.75rem;
   color: var(--brass-hot);
+}
+
+.docs .diagram {
+  margin: 0 0 1rem;
+}
+
+.section-note {
+  margin: 0;
+  color: var(--mist-dim);
+  font-size: 0.95rem;
+}
+
+.section-note a {
+  color: var(--sea-bright);
+  text-decoration: none;
+}
+
+.section-note a:hover {
+  color: var(--brass-hot);
+}
+
+.decision {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1rem;
+  font-size: 0.95rem;
+}
+
+.decision th,
+.decision td {
+  text-align: left;
+  padding: 0.7rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.decision th {
+  color: var(--mist-dim);
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+
+.decision td.yes {
+  color: var(--sea-bright);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.decision td.no {
+  color: var(--mist-dim);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .doc-list {

@@ -2,7 +2,8 @@
 
 Kohen keeps a workload's **configuration** and **secret wiring** in sync with a
 path in a dedicated git repository — then rolls the workload when the version
-changes.
+changes. For when (not) to use it, see the
+[README](../README.md#when-to-use-kohen--and-when-not).
 
 ## Core objects
 
@@ -22,7 +23,7 @@ changes.
 4. **Apply** owned objects via Server-Side Apply (field manager `kohen`)
 5. **Wire** volumes/mounts/env into the target workload
 6. **Stamp** config version; trigger rollout only on change
-7. **Report** status conditions (§11.4)
+7. **Report** status conditions
 
 ## Consistency model
 
@@ -30,7 +31,7 @@ changes.
 - Config version = `git:<short-sha>` plus `-sec:<hash>` when env-surfaced secrets exist
 - File-surfaced secret rotation updates in place (no rollout); env rotation rolls once
 
-## Namespace locality (R-AUTH.5)
+## Namespace locality
 
 `workloadRef`, `configMap`, credential Secrets, and resolved Secrets must all
 live in the **same namespace** as the `ConfigSync`. There is no cross-namespace
@@ -41,7 +42,3 @@ mode in v1.
 Kohen merges only its owned fields. Argo CD / Flux must use **Server-Side
 Apply** and the documented ignore rules — see
 [Getting Started & GitOps](./getting-started-and-gitops.md#gitops-coexistence).
-
-## When to use Kohen
-
-See the decision table in [`SPEC.md`](../SPEC.md) §2.4 and the README summary.

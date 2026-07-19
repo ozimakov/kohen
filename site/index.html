@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kohen — git config, version-matched rollouts</title>
-  <meta name="description" content="Kohen keeps Kubernetes workloads in sync with a dedicated git configuration repository — ConfigMaps, secret wiring, and exactly-one rollouts." />
+  <title>Kohen — config from a dedicated git repo</title>
+  <meta name="description" content="Kohen syncs domain-specific config from a dedicated git repository into Kubernetes workloads — ConfigMaps, secret wiring, and version-matched rollouts." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -25,14 +25,14 @@
     <section class="hero" aria-label="Intro">
       <div class="hero-copy">
         <p class="brand">Kohen</p>
-        <h1>Git config that rolls with the workload</h1>
+        <h1>Config from a dedicated git repo</h1>
         <p class="lede">
-          Point a <code>ConfigSync</code> at a repo path and a Deployment.
-          Kohen renders the ConfigMap, wires the mount, and stamps exactly one rolling update when the version changes.
+          For apps that consume domain-specific config from their own config repository —
+          not the deployment repo. Kohen renders the path, mounts the ConfigMap, and rolls once when the version changes.
         </p>
         <div class="cta-row">
-          <a class="btn primary" href="docs.html#install">Install v1.0</a>
-          <a class="btn ghost" href="https://github.com/ozimakov/kohen#getting-started">Getting started</a>
+          <a class="btn primary" href="docs.html#when">When to use it</a>
+          <a class="btn ghost" href="https://github.com/ozimakov/kohen/blob/main/docs/getting-started-and-gitops.md">Getting started</a>
         </div>
       </div>
       <div class="hero-visual" aria-hidden="true">
@@ -56,31 +56,39 @@
           </g>
           <path class="pulse" d="M80 270 C220 120, 340 420, 480 270 S740 120, 880 270" fill="none" stroke="url(#trace)" stroke-width="3"/>
           <g class="nodes" font-family="IBM Plex Mono, monospace" font-size="18" fill="#e8f2ec">
-            <text x="100" y="250">git</text>
-            <text x="430" y="250">ConfigMap</text>
-            <text x="760" y="250">rollout</text>
+            <text x="80" y="250">config repo</text>
+            <text x="420" y="250">ConfigMap</text>
+            <text x="740" y="250">rollout</text>
           </g>
         </svg>
       </div>
     </section>
 
-    <section class="strip" id="why">
-      <h2>One job</h2>
+    <section class="strip" id="pattern">
+      <h2>The pattern</h2>
       <p>
-        Kohen is not another GitOps control plane. It coexists with Argo CD and Flux,
-        owning only the config surface your app consumes — with stamps you can read
-        and rollbacks you already know (<code>git</code> pins).
+        Keep domain and environment config in a dedicated git repo. Deploy the app with GitOps.
+        Kohen bridges the two: path → ConfigMap → mount → stamp → roll.
       </p>
+      <pre class="diagram" aria-label="Config repo to workload flow">Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘</pre>
     </section>
 
-    <section class="strip alt" id="ship">
-      <h2>v1.0 artifacts</h2>
+    <section class="strip alt" id="when">
+      <h2>When to use it</h2>
       <p>
-        Multi-arch operator image, signed releases, Helm chart, and plain manifests
-        (cluster + namespaced scopes). Acceptance criteria A1–A12 gate every cut.
+        Use Kohen when a dedicated config repo should drive a workload's ConfigMap, secret wiring,
+        and rollouts — especially alongside Argo CD or Flux. Skip it when GitOps already owns the
+        ConfigMap from the same repo, or when you only need secrets or restart-on-change.
       </p>
-      <p class="mono">
-        helm install kohen oci://ghcr.io/ozimakov/kohen/charts/kohen --version 1.0.0
+      <p>
+        <a href="docs.html#when">Decision table →</a>
       </p>
     </section>
   </main>

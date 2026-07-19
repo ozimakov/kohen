@@ -24,18 +24,17 @@
 >   (owned lifecycle); otherwise Kohen **awaits** an externally-managed secret
 >   (§8.2). Readiness: **first-resolution fail-closed, update fail-safe** (R8.9).
 >
-> **v1.0.** Promotes Draft v0.6 to the shipping contract: closes the nested-path
-> key separator (`__`), documents poll-bounded secret rotation detection,
-> reconcile-time R-AUTH.6 enforcement, and the shipped conditions/`ManifestsApplied`
-> surface. See [`docs/reviews/v1.0-delivery-plan.md`](./docs/reviews/v1.0-delivery-plan.md).
+> **v1.0.** Shipping contract for product SemVer `1.0.x`. User-facing overview:
+> [`README.md`](./README.md).
 
 ---
 
 ## 1. Overview
 
 **Kohen** is a Kubernetes **operator** that keeps native cluster objects in sync
-with a path in a dedicated `git` configuration repository. Given a repo, a
-branch, and a path, Kohen continuously:
+with a path in a dedicated `git` configuration repository — the common pattern
+where an application consumes domain-specific config from a config repo separate
+from its deployment repo. Given a repo, a branch, and a path, Kohen continuously:
 
 - renders non-secret configuration into a **`ConfigMap`**;
 - **resolves** any secret the config references — assuming the backing secret
@@ -152,6 +151,9 @@ Coexistence requirements are normative in §6.2.
 | Bespoke init scripts | Clone config at startup | One-shot, no live updates, no object model, no rollout |
 
 ### 2.4 When to use Kohen — and when not
+
+The canonical user-facing copy of this table lives in the
+[`README`](./README.md#when-to-use-kohen--and-when-not). Normative summary:
 
 | Scenario | Use Kohen? | Use instead / notes |
 | --- | --- | --- |
@@ -780,7 +782,7 @@ troubleshooting table: *symptom → condition/reason → action*.
   `kohen-stamp` for `rollout: none` object annotations); idempotent
   (same commit + tokens ⇒ same objects; same stamp ⇒ **no workload write**).
 - **T4** Kubernetes N-2 minor-version compatibility (declared floor **1.28+**;
-  the v1 CI gate runs latest + one older — see PLAN U3).
+  the v1 CI gate runs latest + one older — see `.github/workflows/u3.yml`).
 - **T-LIMIT** `ConfigMap`/`Secret` bounded by ~1 MiB total object size; Kohen
   fails closed with margin (R7.7).
 - **T5** Multi-arch (`amd64`/`arm64`) minimal image; Helm + plain manifests
@@ -838,17 +840,18 @@ troubleshooting table: *symptom → condition/reason → action*.
 - **NFR7 Documentation:** install (both RBAC scopes), Day-1 runbook, git auth,
   ESO integration, GitOps coexistence quickstart (with snippets, R-WIRE.5),
   troubleshooting (condition/reason catalog §11.4), kubectl operations
-  (§15), security hardening + threat model (§3.3, TM8). The **README MUST carry
-  two usage sections kept current every phase**: a **Getting Started** with a
-  *minimal* configuration (fewest fields, maximum value out of the box, per §1.2
-  + defaults §11.2) and an **Advanced configuration reference** documenting
-  *every* shipped `ConfigSync`/operator field, credential key, annotation, and
-  status/condition. Each phase that adds or changes a user-visible field MUST
-  update both sections in the same change.
+  (§15), security hardening + threat model (§3.3, TM8), and a prominent
+  README intro covering what Kohen is and when to use it (§2.4). The
+  **README MUST carry two usage sections**: a
+  **Getting Started** with a *minimal* configuration (fewest fields, maximum
+  value out of the box, per §1.2 + defaults §11.2) and an **Advanced
+  configuration reference** documenting *every* shipped `ConfigSync`/operator
+  field, credential key, annotation, and status/condition. Changes that add or
+  alter a user-visible field MUST update both sections in the same change.
 - **NFR8 Licensing:** Apache-2.0, contribution guide, code of conduct.
 - **NFR9 Testing:** unit + integration (envtest, git fixture) + e2e (`kind`);
   leak tests on every PR touching reconcile/logging; abuse-case tests for
-  R-AUTH.\* (see PLAN).
+  R-AUTH.\*.
 - **NFR10 Versioning:** SemVer for the **product** (`1.0.x`); CRD API remains
   `v1alpha1` in v1.0.x with a documented compatibility promise
   (`docs/upgrade-uninstall.md`). Breaking CRD changes require a new API version
@@ -961,16 +964,11 @@ mount overlap rejection beyond exact path equality · API promote to
 
 ---
 
-## 20. Relationship to the Existing Prototype
+## 20. Historical note
 
-The repository previously contained an early `kohen-agent` prototype (Go +
-`go-git`) that cloned a repo into a directory via
-`--gitUrl`/`--gitPath`/`--targetDir` and matching env vars. It validated the
-git-fetch premise; its fetch logic maps to the operator's fetch/resolve step
-(S1.1 in PLAN) and its env-var interface is the seed for the deferred sidecar
-mode (§19). The prototype has now been removed (see git history) in favour of
-the clean-room operator implementation described in this SPEC and sequenced in
-PLAN.md; the git-source library (`internal/git`, S1.1) supersedes it.
+An early directory-clone prototype validated the git-fetch premise and has been
+removed (see git history). The operator's git-source library (`internal/git`)
+supersedes it; a sidecar/env-var delivery mode remains deferred (§19).
 
 ---
 
@@ -979,5 +977,4 @@ PLAN.md; the git-source library (`internal/git`, S1.1) supersedes it.
 Requirements are labeled inline (`Gn`, `Nn`, `UCn`, `TMn`, `R-AUTH.n`,
 `R7.n`, `R8.n`, `R-WIRE.n`, `R-ROLLOUT.n`, `R-ATOM/CONS/VERSION/SAFE/ROLLBACK/
 SINGLETON`, `R10.n`, `R11.n`, `R13.n`, `Tn`, `T-LIMIT`, `NFRn`, `An`, `Pn`,
-`RDn`). PLAN.md references these IDs; a CI docs check SHOULD verify that PLAN
-references resolve to existing SPEC IDs.
+`RDn`).

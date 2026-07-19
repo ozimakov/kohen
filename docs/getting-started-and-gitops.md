@@ -1,14 +1,14 @@
-# Getting Started & GitOps Coexistence (U1 runbook)
+# Getting Started & GitOps Coexistence
 
-This runbook is the verified, copy-pasteable path for the **config-only** journey
-covered by usability milestone **U1** (`PLAN.md`). It is exercised end-to-end in
-CI on `kind` (`test/e2e`), so every command below is expected to work verbatim.
+This runbook is the verified, copy-pasteable Day-1 path for syncing config from
+a dedicated git repository. It is exercised end-to-end in CI on `kind`
+(`test/e2e`), so every command below is expected to work verbatim.
 
 Kohen turns a path in a **dedicated git config repository** into the `ConfigMap`
 a workload consumes, wires that `ConfigMap` into the workload, and rolls the
 workload when the config changes. It is **not** a GitOps/CD engine — it composes
 with Argo CD and Flux rather than replacing them (see
-[GitOps coexistence](#gitops-coexistence) and `SPEC.md` §2.2/§2.4).
+[GitOps coexistence](#gitops-coexistence)).
 
 - [1. Prerequisites](#1-prerequisites)
 - [2. Install Kohen (Helm)](#2-install-kohen-helm)
