@@ -65,6 +65,18 @@ jobs:
         run: helm template kohen deploy/helm/kohen --include-crds > /dev/null
       - name: helm template (namespaced scope)
         run: helm template kohen deploy/helm/kohen --include-crds --set scope=namespaced > /dev/null
+      - name: SemVer tag validator self-test
+        run: make release-validate-test
+      - name: Release package dry-run
+        run: make release-package VERSION=0.0.0-ci
+      - name: Assert release artifacts
+        run: |
+          set -euo pipefail
+          test -f dist/kohen-0.0.0-ci.tgz
+          test -f dist/manifests/kohen.yaml
+          test -f dist/manifests/kohen-namespaced.yaml
+          test -f dist/SHA256SUMS
+          grep -q 'ghcr.io/ozimakov/kohen:0.0.0-ci' dist/manifests/kohen.yaml
 
   test:
     name: Build & Test

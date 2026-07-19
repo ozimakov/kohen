@@ -99,6 +99,27 @@ manifests-bundle: ## Render plain Kubernetes manifests from the Helm chart.
 		--namespace kohen-system --set scope=namespaced \
 		> deploy/manifests/kohen-namespaced.yaml
 
+##@ Release
+
+VERSION ?= $(shell sed -n 's/^appVersion: *"\(.*\)"/\1/p' deploy/helm/kohen/Chart.yaml)
+IMAGE_REPO ?= ghcr.io/ozimakov/kohen
+
+.PHONY: release-validate
+release-validate: ## Validate VERSION as SemVer (VERSION=1.0.0-rc.1).
+	@bash scripts/validate-release-tag.sh "$(VERSION)"
+
+.PHONY: release-validate-test
+release-validate-test: ## Self-test SemVer tag validation script.
+	@bash scripts/validate-release-tag_test.sh
+
+.PHONY: release-package
+release-package: release-validate ## Package chart + pinned manifests + checksums into dist/ (no push).
+	IMAGE_REPO=$(IMAGE_REPO) bash scripts/package-release.sh "$(VERSION)" dist
+
+.PHONY: release-dry-run
+release-dry-run: release-package ## Alias for local release packaging rehearsal.
+	@echo "Dry-run package ready under dist/ for version $(VERSION)"
+
 .PHONY: kind-load
 kind-load: ## Load the built images into the kind cluster.
 	kind load docker-image $(IMG) --name $(KIND_CLUSTER)

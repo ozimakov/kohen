@@ -1,91 +1,217 @@
-# SemVer release pipeline (PLAN S3.3): tagged releases publish multi-arch images,
-# Helm chart artifacts (cluster + namespaced bundles), SBOM, and cosign signatures.
+# SemVer release pipeline (PLAN S3.3 / NFR10).
+#
+# Primary trigger: publish a GitHub Release (UI / `gh release create`).
+# That event supplies the tag; this workflow builds, pushes, signs, and
+# attaches artifacts to THAT release.
+#
+# Rehearse packaging without publishing:
+#   Actions → Release → Run workflow → version=1.0.0-rc.1, dry_run=true
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SemVer without leading v (e.g. 1.0.0-rc.1)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Package only — do not push image/chart or upload release assets'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
   packages: write
   id-token: write
+  attestations: write
+
+concurrency:
+  # One publish at a time per tag / dispatch run.
+  group: release-${{ github.event.release.tag_name || inputs.version || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
     name: Build & publish
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Release events check out the tag commit; fetch history for notes.
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || github.sha }}
 
-      - name: Parse version
-        id: ver
+      - name: Resolve version
+        id: meta
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/${{ github.repository }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            release)
+              RAW="${{ github.event.release.tag_name }}"
+              DRY_RUN="false"
+              # Honor the Release UI prerelease checkbox when set.
+              UI_PRE="${{ github.event.release.prerelease }}"
+              ;;
+            workflow_dispatch)
+              RAW="${{ inputs.version }}"
+              DRY_RUN="${{ inputs.dry_run }}"
+              UI_PRE=""
+              ;;
+            *)
+              echo "error: unsupported event ${{ github.event_name }}" >&2
+              exit 1
+              ;;
+          esac
+          eval "$(bash scripts/validate-release-tag.sh "${RAW}")"
+          # Prefer the GitHub Release prerelease flag when present.
+          if [[ "${UI_PRE}" == "true" ]]; then
+            prerelease=true
+          elif [[ "${UI_PRE}" == "false" ]]; then
+            prerelease=false
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "prerelease=${prerelease}"
+            echo "dry_run=${DRY_RUN}"
+            echo "commit=$(git rev-parse --short=12 HEAD)"
+          } | tee -a "$GITHUB_OUTPUT"
+          echo "Resolved version=${version} tag=v${version} prerelease=${prerelease} dry_run=${DRY_RUN}"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Package chart & manifests
+        env:
+          IMAGE_REPO: ${{ env.IMAGE }}
+        run: |
+          set -euo pipefail
+          bash scripts/package-release.sh "${{ steps.meta.outputs.version }}" dist
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kohen-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.tgz
+            dist/manifests/**
+            dist/SHA256SUMS
+            dist/release-notes.md
+          if-no-files-found: error
+
+      # ----- publish path (skipped on dry_run) -----
 
       - uses: docker/setup-qemu-action@v3
+        if: steps.meta.outputs.dry_run != 'true'
+
       - uses: docker/setup-buildx-action@v3
+        if: steps.meta.outputs.dry_run != 'true'
 
       - uses: docker/login-action@v3
+        if: steps.meta.outputs.dry_run != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Docker metadata
+        id: docker_meta
+        if: steps.meta.outputs.dry_run != 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.meta.outputs.version }}
+            type=raw,value=latest,enable=${{ steps.meta.outputs.prerelease != 'true' }}
+
       - name: Build & push operator image
+        id: build
+        if: steps.meta.outputs.dry_run != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}
-            ${{ steps.ver.outputs.image }}:latest
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
           sbom: true
           provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - uses: azure/setup-helm@v4
-        with:
-          version: v3.16.3
-
-      - name: Package & push Helm chart
+      - name: Push Helm chart (OCI)
+        if: steps.meta.outputs.dry_run != 'true'
         run: |
           set -euo pipefail
-          sed -i "s/^version:.*/version: ${{ steps.ver.outputs.version }}/" deploy/helm/kohen/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.ver.outputs.version }}\"/" deploy/helm/kohen/Chart.yaml
-          helm package deploy/helm/kohen -d dist/
-          helm push dist/kohen-${{ steps.ver.outputs.version }}.tgz \
-            oci://ghcr.io/${{ github.repository_owner }}/charts
-
-      - name: Render manifest bundles
-        run: |
-          set -euo pipefail
-          mkdir -p dist/manifests
-          helm template kohen deploy/helm/kohen --include-crds \
-            --namespace kohen-system > dist/manifests/kohen.yaml
-          helm template kohen deploy/helm/kohen --include-crds \
-            --namespace kohen-system \
-            --set scope=namespaced > dist/manifests/kohen-namespaced.yaml
+          helm push "dist/kohen-${{ steps.meta.outputs.version }}.tgz" \
+            "oci://${{ env.IMAGE }}/charts"
 
       - name: Install cosign
+        if: steps.meta.outputs.dry_run != 'true'
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image
+      - name: Sign image (keyless, by digest)
+        if: steps.meta.outputs.dry_run != 'true'
         env:
           COSIGN_YES: "true"
         run: |
           set -euo pipefail
-          cosign sign --yes "${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          if [[ -z "${DIGEST}" ]]; then
+            echo "error: build-push-action did not emit an image digest" >&2
+            exit 1
+          fi
+          cosign sign --yes "${{ env.IMAGE }}@${DIGEST}"
 
-      - name: Upload release artifacts
+      - name: Sign Helm chart (keyless)
+        if: steps.meta.outputs.dry_run != 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${{ env.IMAGE }}/charts/kohen:${{ steps.meta.outputs.version }}"
+
+      - name: Attach artifacts to GitHub Release
+        if: steps.meta.outputs.dry_run != 'true' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          # Target the release that triggered this run (do not create a new one).
+          tag_name: ${{ github.event.release.tag_name }}
           files: |
             dist/*.tgz
             dist/manifests/kohen.yaml
             dist/manifests/kohen-namespaced.yaml
+            dist/SHA256SUMS
+          # Keep any notes written in the Release UI; append install blurb.
+          append_body: true
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+
+      - name: Create GitHub Release (dispatch publish only)
+        # workflow_dispatch with dry_run=false: create/update the release for the tag.
+        if: steps.meta.outputs.dry_run != 'true' && github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          body_path: dist/release-notes.md
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tgz
+            dist/manifests/kohen.yaml
+            dist/manifests/kohen-namespaced.yaml
+            dist/SHA256SUMS

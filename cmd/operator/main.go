@@ -21,6 +21,7 @@ import (
 	"github.com/ozimakov/kohen/internal/config"
 	"github.com/ozimakov/kohen/internal/controller"
 	"github.com/ozimakov/kohen/internal/redact"
+	"github.com/ozimakov/kohen/internal/version"
 )
 
 var scheme = runtime.NewScheme()
@@ -50,6 +51,7 @@ func main() {
 	redactor := redact.New()
 	ctrl.SetLogger(redact.NewLogger(zap.New(zap.UseFlagOptions(&zapOpts)), redactor))
 	setupLog := ctrl.Log.WithName("setup")
+	setupLog.Info("kohen operator", "version", version.Version, "commit", version.Commit)
 
 	opCfg, err := config.Load(configPath)
 	if err != nil {
