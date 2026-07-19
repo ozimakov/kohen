@@ -35,6 +35,10 @@ First public product release. API group/version remains `kohen.dev/v1alpha1`
 
 ### Changed
 
+- Project site deploy: publish `site/` from **`main`** via GitHub Actions Pages
+  (`actions/deploy-pages`); stop publishing an orphan `gh-pages` branch
+- Site and docs: position Kohen as a **Kubernetes-native** operator (native
+  ConfigMaps/Secrets, no sidecars or private volumes)
 - Release publishing automation: SemVer validation, dry-run packaging,
   digest-based cosign, OCI chart under `ghcr.io/ozimakov/kohen/charts`,
   pinned manifest image tags, `SHA256SUMS`, prerelease-aware `:latest`

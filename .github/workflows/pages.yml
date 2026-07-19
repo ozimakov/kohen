@@ -1,19 +1,16 @@
-# Publish the project site (site/) to the gh-pages branch.
+# Publish the project site (site/) from main via GitHub Pages (Actions).
 #
 # Custom domain: kohen.zimakov.net (see site/CNAME).
 #
 # One-time repo setup (Settings → Pages):
-#   Source: Deploy from a branch
-#   Branch: gh-pages / (root)
-#   Custom domain: kohen.zimakov.net (also set by the CNAME file on deploy)
+#   Source: GitHub Actions
+#   Custom domain: kohen.zimakov.net (also set by the CNAME in the artifact)
 #   Enforce HTTPS: enable after DNS verifies
 #
 # DNS (managed outside this repo): CNAME kohen → ozimakov.github.io
 #
-# The official actions/deploy-pages flow requires Pages to already be enabled
-# with "GitHub Actions" as the source; GITHUB_TOKEN cannot enable that. Branch
-# publishing keeps this workflow green and updates the site once Pages is
-# pointed at gh-pages.
+# The site source lives on main under site/. This workflow uploads that
+# directory and deploys it with actions/deploy-pages — no gh-pages branch.
 name: Pages
 
 on:
@@ -25,7 +22,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
@@ -33,18 +32,19 @@ concurrency:
 
 jobs:
   deploy:
-    name: Publish site/
+    name: Deploy site/
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Publish to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          cname: kohen.zimakov.net
-          force_orphan: true
-          user_name: github-actions[bot]
-          user_email: github-actions[bot]@users.noreply.github.com
-          commit_message: 'Deploy site'
+          path: ./site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

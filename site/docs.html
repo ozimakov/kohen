@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kohen documentation</title>
-  <meta name="description" content="What Kohen is, when to use it, and guides for install, GitOps coexistence, secrets, and operations." />
+  <meta name="description" content="Kohen is a Kubernetes-native operator. What it is, when to use it, and guides for install, GitOps coexistence, secrets, and operations." />
   <link rel="canonical" href="https://kohen.zimakov.net/docs.html" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -27,11 +27,25 @@
       <p class="brand">Kohen</p>
       <h1>What is Kohen</h1>
       <p class="lede">
-        A Kubernetes operator for apps that consume domain-specific config from a
+        A <strong>Kubernetes-native</strong> operator for apps that consume domain-specific config from a
         <strong>dedicated git repository</strong> — separate from the deployment repo.
-        Kohen renders a ConfigMap, mounts it, and rolls the workload when the version changes.
+        Kohen renders a ConfigMap, mounts it with standard volume mechanics, wires Secrets the same way,
+        and rolls the workload when the version changes.
       </p>
     </header>
+
+    <section id="native">
+      <h2>Kubernetes-native by design</h2>
+      <p>
+        Kohen ships as a cluster operator (CRD + controller) and delivers config through objects and
+        APIs Kubernetes already understands: <code>ConfigMap</code>, <code>Secret</code>, volume mounts,
+        Server-Side Apply, and rolling updates. Workloads consume the result exactly like hand-authored
+        config — no agent sidecar and no private volume protocol.
+      </p>
+      <p class="section-note">
+        Composes with External Secrets Operator and GitOps (Argo CD / Flux); it does not replace them.
+      </p>
+    </section>
 
     <section id="pattern">
       <h2>The main pattern</h2>
@@ -44,7 +58,8 @@
      │Kohen │── ConfigMap ─────▶│   Workload   │
      └──────┘── mount+rollout ─▶└──────────────┘</pre>
       <p class="section-note">
-        Not a GitOps control plane: deploy what runs with Argo CD / Flux; keep config in sync with Kohen.
+        Kubernetes-native delivery, not a GitOps control plane: deploy what runs with Argo CD / Flux;
+        keep config in sync with Kohen.
       </p>
     </section>
 
