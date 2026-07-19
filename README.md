@@ -38,7 +38,7 @@ Config repo                     Deploy / GitOps
 - [Concepts](./docs/concepts.md) · [Secrets](./docs/secrets.md) · [Operations](./docs/operations.md)
 - [Troubleshooting](./docs/troubleshooting.md) · [Security](./docs/security.md) · [Upgrade](./docs/upgrade-uninstall.md)
 - [Specification](./SPEC.md) — behavioral contract
-- [Project site](https://ozimakov.github.io/kohen/)
+- [Project site](https://kohen.zimakov.net/)
 
 > **v1.0** · API `kohen.dev/v1alpha1` · see [upgrade notes](./docs/upgrade-uninstall.md)
 

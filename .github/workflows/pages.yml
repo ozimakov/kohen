@@ -1,8 +1,14 @@
 # Publish the project site (site/) to the gh-pages branch.
 #
+# Custom domain: kohen.zimakov.net (see site/CNAME).
+#
 # One-time repo setup (Settings → Pages):
 #   Source: Deploy from a branch
 #   Branch: gh-pages / (root)
+#   Custom domain: kohen.zimakov.net (also set by the CNAME file on deploy)
+#   Enforce HTTPS: enable after DNS verifies
+#
+# DNS (managed outside this repo): CNAME kohen → ozimakov.github.io
 #
 # The official actions/deploy-pages flow requires Pages to already be enabled
 # with "GitHub Actions" as the source; GITHUB_TOKEN cannot enable that. Branch
@@ -37,6 +43,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
+          cname: kohen.zimakov.net
           force_orphan: true
           user_name: github-actions[bot]
           user_email: github-actions[bot]@users.noreply.github.com
