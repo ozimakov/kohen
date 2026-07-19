@@ -1,44 +1,59 @@
-# KOHEN
+# Kohen
 
-`Kohen` is a Kubernetes-native configuration management tool that lets
-applications consume configuration from a dedicated `git` repository and
-consistently roll out after any change.
+Kohen is a Kubernetes operator for one pattern: **an application that consumes
+domain-specific configuration from a dedicated git repository**.
 
-`Kohen` is **not** an alternative to GitOps solutions. It adds capabilities for
-applications that prefer running against a dedicated configuration repository
-covering multiple environments, and is engineered to **coexist** with Argo CD /
-Flux rather than replace them (see [GitOps coexistence](#gitops-coexistence) and
-the "when to use Kohen — and when not" decision table in [`SPEC.md`](./SPEC.md)
-§2.4).
+Point a `ConfigSync` at a git repo path and a workload. Kohen renders that path
+into a `ConfigMap`, mounts it, and rolls the workload when the config version
+changes — version-matched across the fleet.
 
-In one `ConfigSync` you point at a git repo + path and a workload; Kohen renders
-the path into a `ConfigMap`, mounts it into the workload, and rolls the workload
-whenever the config changes — version-matched across the fleet.
+Kohen is **not** a GitOps replacement. Use Argo CD / Flux to deploy **what**
+runs; use Kohen to keep a running workload's **config** in sync with a dedicated
+config repo. See **[What is Kohen](./docs/intro.md)** for the pattern, a
+diagram, and when (not) to use it.
+
+```text
+  config repo                         cluster
+  (domain / env config)               ┌─────────────────────────────────┐
+                                      │                                 │
+  services/checkout/prod/  ──fetch──▶ │  Kohen                          │
+    app.yaml                          │    │                            │
+    feature.toml                      │    ├─▶ ConfigMap (rendered)     │
+                                      │    ├─▶ mount into Deployment    │
+                                      │    └─▶ stamp + rolling update   │
+                                      │                                 │
+  deploy repo / GitOps ──deploy──▶    │  Deployment (checkout)          │
+                                      └─────────────────────────────────┘
+```
+
+### When to use Kohen — and when not
+
+| Scenario | Use Kohen? | Notes |
+| --- | --- | --- |
+| Dedicated config repo drives a workload's `ConfigMap` + secret wiring + rollouts | **Yes** | Core use case |
+| GitOps deploys the app; config lives in a **separate** config repo | **Yes** | Apply [GitOps ignore rules](#gitops-coexistence) |
+| GitOps already renders the app **and** its `ConfigMap` from the same repo | No | A second reconciler adds no value |
+| Config exceeds `ConfigMap` size (~1 MiB) or is a large file tree | No | Prefer a `git-sync`-to-volume pattern |
+| You only need secrets from an external store | No | Use External Secrets Operator directly |
+| You hand-author a `ConfigMap` and only want restart-on-change | No | Reloader (or similar) is enough |
+| You want product feature toggles / experiments in code | No | Use a feature-flag platform |
 
 ## Documentation
 
-- [`SPEC.md`](./SPEC.md) — full technical/non-technical requirements,
-  architecture, consistency model, threat model, and acceptance criteria.
-- [`PLAN.md`](./PLAN.md) — the implementation sequence toward **v1.0**.
-- [Concepts](./docs/concepts.md) — architecture, reconcile flow, consistency model.
-- [Install](./docs/install.md) — Helm and plain manifests, both RBAC scopes.
-- [Getting Started & GitOps runbook](./docs/getting-started-and-gitops.md)
-  — verified Day-1 walkthrough (install → sync → rollout → auth → rollback →
-  GitOps coexistence), exercised in CI on `kind`.
-- [Secret integration guide (ESO + native)](./docs/secrets.md) — reference
-  secrets safely; readiness, rotation, guard rails, Vault-via-ESO tree.
-- [Operations](./docs/operations.md) — kubectl status, force-sync, rollback.
-- [Troubleshooting](./docs/troubleshooting.md) — symptom → condition → action.
-- [Security hardening](./docs/security.md) — threat model, RBAC, allow-lists.
-- [Upgrade & uninstall](./docs/upgrade-uninstall.md) — SemVer, CRD policy, A12.
-- [v1.0 delivery plan](./docs/reviews/v1.0-delivery-plan.md) — gap decisions for the release.
-- [Project site](https://ozimakov.github.io/kohen/) — landing page and docs index.
+- **[What is Kohen](./docs/intro.md)** — positioning, pattern, when to use
+- [Install](./docs/install.md) — Helm and plain manifests, both RBAC scopes
+- [Getting Started & GitOps](./docs/getting-started-and-gitops.md) — Day-1 walkthrough on `kind`
+- [Concepts](./docs/concepts.md) — architecture, reconcile flow, consistency
+- [Secrets (ESO + native)](./docs/secrets.md)
+- [Operations](./docs/operations.md) · [Troubleshooting](./docs/troubleshooting.md)
+- [Security](./docs/security.md) · [Upgrade & uninstall](./docs/upgrade-uninstall.md)
+- [Specification](./SPEC.md) — behavioral contract and acceptance criteria
+- [Project site](https://ozimakov.github.io/kohen/)
 
-> **Status:** **v1.0** — Phases 0–3 and the [U3 acceptance gate](./.github/workflows/u3.yml)
-> (**A1–A12** on `kind`, two Kubernetes minors × Helm + plain manifests) are the
-> shipping bar. API group/version remains `kohen.dev/v1alpha1` (see
-> [upgrade notes](./docs/upgrade-uninstall.md)). `spec.secretRefs` supports
-> `externalSecret` and `nativeSecret` backends.
+> **Status:** **v1.0** — acceptance suite A1–A12 on `kind` (see
+> [`.github/workflows/u3.yml`](./.github/workflows/u3.yml)). API group remains
+> `kohen.dev/v1alpha1` ([upgrade notes](./docs/upgrade-uninstall.md)).
+> `spec.secretRefs` supports `externalSecret` and `nativeSecret`.
 
 ---
 
@@ -234,7 +249,7 @@ Install-time values (see [`deploy/helm/kohen/values.yaml`](./deploy/helm/kohen/v
 Regardless of the allow-list, Kohen always blocks source hosts that resolve to
 loopback, link-local (incl. the `169.254.169.254` metadata endpoint),
 unspecified, or multicast addresses, and re-screens every HTTP redirect hop
-(`SPEC.md` R-AUTH.7).
+(see [security hardening](./docs/security.md)).
 
 ### Annotations
 
@@ -278,11 +293,3 @@ CD / Flux is guaranteed when the other controller uses SSA **and** applies the
 documented ignore rules; client-side / whole-object appliers will strip Kohen's
 fields. Copy-paste Argo CD `ignoreDifferences` and Flux `Merge` SSA snippets are
 in the [runbook](./docs/getting-started-and-gitops.md#gitops-coexistence).
-
----
-
-## When to use Kohen — and when not
-
-Use GitOps to deploy **what** runs; use Kohen to keep a running workload's
-**config** in sync with a dedicated config repo and roll it out consistently.
-See the decision table in [`SPEC.md`](./SPEC.md) §2.4 before adopting.

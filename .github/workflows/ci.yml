@@ -1,8 +1,4 @@
-# Continuous integration for Kohen (PLAN S0.1).
-#
-# Tiers currently wired: lint + Tier 1 unit and Tier 2 (local git fixture)
-# tests. Tier 2 envtest and Tier 3 kind (U1) jobs slot in as the operator
-# packages land (S1.3+); see the notes at the bottom of this file.
+# Continuous integration for Kohen.
 name: CI
 
 on:
@@ -111,10 +107,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: SPEC reference validation
-        run: bash scripts/verify-spec-refs.sh
       - name: Doc link check
         run: bash scripts/verify-doc-links.sh
-
-# Tier 3 acceptance (U3) runs in .github/workflows/u3.yml.
-# Release publishing runs in .github/workflows/release.yml (S3.3).

@@ -1,5 +1,5 @@
-# U3 acceptance gate (PLAN U3): full A1–A12 matrix on kind across Kubernetes
-# minor versions and install methods. Gates v1.0 releases.
+# Full A1–A12 acceptance matrix on kind across Kubernetes minor versions and
+# install methods. Gates v1.0 releases.
 name: U3 Acceptance (kind)
 
 on:

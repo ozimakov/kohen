@@ -1,7 +1,7 @@
 # Contributing to Kohen
 
-Thank you for contributing. This project follows the requirements in
-[`SPEC.md`](./SPEC.md) and the implementation sequence in [`PLAN.md`](./PLAN.md).
+Thanks for contributing. Behavioral requirements live in [`SPEC.md`](./SPEC.md);
+user-facing docs start at [`docs/intro.md`](./docs/intro.md).
 
 ## Development setup
 
@@ -16,12 +16,12 @@ For end-to-end tests you need `kind`, `kubectl`, `helm`, and Docker:
 make docker-build kind-load e2e
 ```
 
-See [`test/README.md`](./test/README.md) for tier documentation.
+See [`test/README.md`](./test/README.md) for how tests are organized.
 
 ## Pull requests
 
-1. One plan step per PR when possible (branch `cursor/<name>-…`).
-2. Every change ships tests for the tier(s) declared in the plan step.
+1. Keep changes focused; prefer one concern per PR.
+2. Ship tests with behavior changes.
 3. Update docs when adding user-visible fields (README Getting Started +
    Advanced reference, plus relevant `docs/` pages).
 4. Run `make verify` before pushing.

@@ -1,7 +1,6 @@
-# Tier 3 end-to-end suite (PLAN U1): a real kind cluster with a kubelet, the
-# operator installed via Helm, an in-cluster git server, and the config-only
-# user journeys asserted end to end. Kept in its own workflow so it gates the U1
-# milestone independently of the fast unit/integration CI.
+# Tier 3 end-to-end suite: a real kind cluster with a kubelet, the operator
+# installed via Helm, an in-cluster git server, and config-only user journeys
+# asserted end to end.
 name: E2E (kind)
 
 on:

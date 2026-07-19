@@ -1,4 +1,4 @@
-# SemVer release pipeline (PLAN S3.3 / NFR10).
+# SemVer release pipeline.
 #
 # Primary trigger: publish a GitHub Release (UI / `gh release create`).
 # That event supplies the tag; this workflow builds, pushes, signs, and

@@ -1,7 +1,6 @@
 # Kohen — developer Makefile
 #
-# Common entry points used by CI and local development. See PLAN.md S0.1.
-# Additional targets (image, manifests, e2e) are introduced by later plan steps.
+# Common entry points used by CI and local development.
 
 SHELL := /usr/bin/env bash
 GO ?= go
@@ -154,8 +153,7 @@ e2e-u3: ## Run the full U3 acceptance gate (U1 + U2 + security + acceptance + up
 	$(MAKE) e2e-lifecycle
 
 .PHONY: verify-docs
-verify-docs: ## Validate SPEC refs in PLAN.md and doc links.
-	bash scripts/verify-spec-refs.sh
+verify-docs: ## Validate internal markdown links in docs and README.
 	bash scripts/verify-doc-links.sh
 
 .PHONY: vet
