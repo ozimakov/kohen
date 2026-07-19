@@ -1,7 +1,8 @@
 # Contributing to Kohen
 
 Thanks for contributing. Behavioral requirements live in [`SPEC.md`](./SPEC.md);
-start with the [README](./README.md) for usage docs.
+start with the [README](./README.md) for usage docs. AI agents and automation
+must follow [`AGENT.md`](./AGENT.md) (ground rules, TDD, change checklist).
 
 ## Development setup
 
