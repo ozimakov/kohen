@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kohen — config from a dedicated git repo</title>
+  <meta name="description" content="Kohen syncs domain-specific config from a dedicated git repository into Kubernetes workloads — ConfigMaps, secret wiring, and version-matched rollouts." />
+  <link rel="canonical" href="https://kohen.zimakov.net/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <a class="wordmark" href="./">Kohen</a>
+    <nav aria-label="Primary">
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/ozimakov/kohen">GitHub</a>
+      <a class="nav-cta" href="https://github.com/ozimakov/kohen/releases">Releases</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-label="Intro">
+      <div class="hero-copy">
+        <p class="brand">Kohen</p>
+        <h1>Config from a dedicated git repo</h1>
+        <p class="lede">
+          For apps that consume domain-specific config from their own config repository —
+          not the deployment repo. Kohen renders the path, mounts the ConfigMap, and rolls once when the version changes.
+        </p>
+        <div class="cta-row">
+          <a class="btn primary" href="docs.html#when">When to use it</a>
+          <a class="btn ghost" href="https://github.com/ozimakov/kohen/blob/main/docs/getting-started-and-gitops.md">Getting started</a>
+        </div>
+      </div>
+      <div class="hero-visual" aria-hidden="true">
+        <svg class="flow" viewBox="0 0 960 540" role="img">
+          <defs>
+            <linearGradient id="plane" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#0f2a24"/>
+              <stop offset="55%" stop-color="#1a3d34"/>
+              <stop offset="100%" stop-color="#0b1c18"/>
+            </linearGradient>
+            <linearGradient id="trace" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#c4a35a" stop-opacity="0"/>
+              <stop offset="40%" stop-color="#e2c27a"/>
+              <stop offset="100%" stop-color="#7eb8a2" stop-opacity="0.2"/>
+            </linearGradient>
+          </defs>
+          <rect width="960" height="540" fill="url(#plane)"/>
+          <g class="grid">
+            <path d="M0 90 H960 M0 180 H960 M0 270 H960 M0 360 H960 M0 450 H960" stroke="#2f5a4e" stroke-opacity=".35"/>
+            <path d="M120 0 V540 M240 0 V540 M360 0 V540 M480 0 V540 M600 0 V540 M720 0 V540 M840 0 V540" stroke="#2f5a4e" stroke-opacity=".22"/>
+          </g>
+          <path class="pulse" d="M80 270 C220 120, 340 420, 480 270 S740 120, 880 270" fill="none" stroke="url(#trace)" stroke-width="3"/>
+          <g class="nodes" font-family="IBM Plex Mono, monospace" font-size="18" fill="#e8f2ec">
+            <text x="80" y="250">config repo</text>
+            <text x="420" y="250">ConfigMap</text>
+            <text x="740" y="250">rollout</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <section class="strip" id="pattern">
+      <h2>The pattern</h2>
+      <p>
+        Keep domain and environment config in a dedicated git repo. Deploy the app with GitOps.
+        Kohen bridges the two: path → ConfigMap → mount → stamp → roll.
+      </p>
+      <pre class="diagram" aria-label="Config repo to workload flow">Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘</pre>
+    </section>
+
+    <section class="strip alt" id="when">
+      <h2>When to use it</h2>
+      <p>
+        Use Kohen when a dedicated config repo should drive a workload's ConfigMap, secret wiring,
+        and rollouts — especially alongside Argo CD or Flux. Skip it when GitOps already owns the
+        ConfigMap from the same repo, or when you only need secrets or restart-on-change.
+      </p>
+      <p>
+        <a href="docs.html#when">Decision table →</a>
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Apache-2.0 · <a href="https://github.com/ozimakov/kohen">ozimakov/kohen</a> · API <code>kohen.dev/v1alpha1</code></p>
+  </footer>
+  <script>
+    document.documentElement.classList.add("ready");
+  </script>
+</body>
+</html>

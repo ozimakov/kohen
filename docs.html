@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kohen documentation</title>
+  <meta name="description" content="What Kohen is, when to use it, and guides for install, GitOps coexistence, secrets, and operations." />
+  <link rel="canonical" href="https://kohen.zimakov.net/docs.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <a class="wordmark" href="./">Kohen</a>
+    <nav aria-label="Primary">
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="https://github.com/ozimakov/kohen">GitHub</a>
+      <a class="nav-cta" href="https://github.com/ozimakov/kohen/releases">Releases</a>
+    </nav>
+  </header>
+
+  <main id="main" class="docs">
+    <header class="docs-hero" id="intro">
+      <p class="brand">Kohen</p>
+      <h1>What is Kohen</h1>
+      <p class="lede">
+        A Kubernetes operator for apps that consume domain-specific config from a
+        <strong>dedicated git repository</strong> — separate from the deployment repo.
+        Kohen renders a ConfigMap, mounts it, and rolls the workload when the version changes.
+      </p>
+    </header>
+
+    <section id="pattern">
+      <h2>The main pattern</h2>
+      <pre class="diagram" aria-label="Config repo to workload flow">Config repo                     Deploy / GitOps
+(domain + env config)           (app manifests)
+        │                              │
+        │ path                         │ Deployment
+        ▼                              ▼
+     ┌──────┐                   ┌──────────────┐
+     │Kohen │── ConfigMap ─────▶│   Workload   │
+     └──────┘── mount+rollout ─▶└──────────────┘</pre>
+      <p class="section-note">
+        Not a GitOps control plane: deploy what runs with Argo CD / Flux; keep config in sync with Kohen.
+      </p>
+    </section>
+
+    <section id="when">
+      <h2>When to use it — and when not</h2>
+      <table class="decision">
+        <thead>
+          <tr><th>Scenario</th><th>Use Kohen?</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Dedicated config repo drives ConfigMap + secret wiring + rollouts</td><td class="yes">Yes</td></tr>
+          <tr><td>GitOps deploys the app; config lives in a separate config repo</td><td class="yes">Yes</td></tr>
+          <tr><td>GitOps already owns the app and its ConfigMap from the same repo</td><td class="no">No</td></tr>
+          <tr><td>Config larger than ~1&nbsp;MiB / large file trees</td><td class="no">No</td></tr>
+          <tr><td>Secrets-only, or restart-on-change for a hand-authored ConfigMap</td><td class="no">No</td></tr>
+        </tbody>
+      </table>
+      <p class="section-note">
+        Full notes in the
+        <a href="https://github.com/ozimakov/kohen/blob/main/README.md#when-to-use-kohen--and-when-not">README</a>.
+      </p>
+    </section>
+
+    <section id="guides">
+      <h2>Guides</h2>
+      <ul class="doc-list">
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/README.md">README</a> — overview, when to use, field reference</li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/install.md">Install</a> — Helm and plain manifests</li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/getting-started-and-gitops.md">Getting started &amp; GitOps</a> — Day-1 runbook on kind</li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/concepts.md">Concepts</a></li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/secrets.md">Secrets (ESO + native)</a></li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/operations.md">Operations</a> · <a href="https://github.com/ozimakov/kohen/blob/main/docs/troubleshooting.md">Troubleshooting</a></li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/docs/security.md">Security</a> · <a href="https://github.com/ozimakov/kohen/blob/main/docs/upgrade-uninstall.md">Upgrade &amp; uninstall</a></li>
+        <li><a href="https://github.com/ozimakov/kohen/blob/main/SPEC.md">Specification</a> — behavioral contract</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>Apache-2.0 · <a href="./">Home</a> · <a href="https://github.com/ozimakov/kohen">GitHub</a></p>
+  </footer>
+  <script>
+    document.documentElement.classList.add("ready");
+  </script>
+</body>
+</html>
