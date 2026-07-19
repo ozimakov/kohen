@@ -2,10 +2,8 @@
 
 Kohen keeps a workload's **configuration** and **secret wiring** in sync with a
 path in a dedicated git repository — then rolls the workload when the version
-changes.
-
-For product positioning and the decision table, start with
-**[What is Kohen](./intro.md)**.
+changes. For when (not) to use it, see the
+[README](../README.md#when-to-use-kohen--and-when-not).
 
 ## Core objects
 

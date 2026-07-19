@@ -1,7 +1,7 @@
 # Contributing to Kohen
 
 Thanks for contributing. Behavioral requirements live in [`SPEC.md`](./SPEC.md);
-user-facing docs start at [`docs/intro.md`](./docs/intro.md).
+start with the [README](./README.md) for usage docs.
 
 ## Development setup
 

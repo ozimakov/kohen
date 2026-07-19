@@ -1,7 +1,5 @@
 # Install Kohen
 
-New here? See **[What is Kohen](./intro.md)** for the pattern and when to use it.
-
 Kohen ships as a Helm chart and as plain Kubernetes manifests generated from
 that chart. Both paths install the same operator.
 

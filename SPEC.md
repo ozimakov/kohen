@@ -24,8 +24,8 @@
 >   (owned lifecycle); otherwise Kohen **awaits** an externally-managed secret
 >   (§8.2). Readiness: **first-resolution fail-closed, update fail-safe** (R8.9).
 >
-> **v1.0.** Shipping contract for product SemVer `1.0.x`. User-facing intro:
-> [`docs/intro.md`](./docs/intro.md).
+> **v1.0.** Shipping contract for product SemVer `1.0.x`. User-facing overview:
+> [`README.md`](./README.md).
 
 ---
 
@@ -152,8 +152,8 @@ Coexistence requirements are normative in §6.2.
 
 ### 2.4 When to use Kohen — and when not
 
-The canonical user-facing copy of this table lives in
-[`docs/intro.md`](./docs/intro.md). Normative summary:
+The canonical user-facing copy of this table lives in the
+[`README`](./README.md#when-to-use-kohen--and-when-not). Normative summary:
 
 | Scenario | Use Kohen? | Use instead / notes |
 | --- | --- | --- |
@@ -841,8 +841,8 @@ troubleshooting table: *symptom → condition/reason → action*.
   ESO integration, GitOps coexistence quickstart (with snippets, R-WIRE.5),
   troubleshooting (condition/reason catalog §11.4), kubectl operations
   (§15), security hardening + threat model (§3.3, TM8), and a prominent
-  intro ([`docs/intro.md`](./docs/intro.md)) covering what Kohen is and when
-  to use it (§2.4). The **README MUST carry two usage sections**: a
+  README intro covering what Kohen is and when to use it (§2.4). The
+  **README MUST carry two usage sections**: a
   **Getting Started** with a *minimal* configuration (fewest fields, maximum
   value out of the box, per §1.2 + defaults §11.2) and an **Advanced
   configuration reference** documenting *every* shipped `ConfigSync`/operator

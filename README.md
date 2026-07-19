@@ -19,7 +19,17 @@ Config repo                     Deploy / GitOps
      └──────┘── mount+rollout ─▶└──────────────┘
 ```
 
-**[What is Kohen / when to use it →](./docs/intro.md)**
+## When to use Kohen — and when not
+
+| Scenario | Use Kohen? | Notes |
+| --- | --- | --- |
+| Dedicated config repo drives a workload's `ConfigMap` + secret wiring + rollouts | **Yes** | Core use case |
+| GitOps deploys the app; config lives in a **separate** config repo | **Yes** | Apply [GitOps ignore rules](#gitops-coexistence) |
+| GitOps already renders the app **and** its `ConfigMap` from the same repo | No | A second reconciler adds no value |
+| Config exceeds `ConfigMap` size (~1 MiB) or is a large file tree | No | Prefer a `git-sync`-to-volume pattern |
+| You only need secrets from an external store | No | Use External Secrets Operator directly |
+| You hand-author a `ConfigMap` and only want restart-on-change | No | Reloader (or similar) is enough |
+| You want product feature toggles / experiments in code | No | Use a feature-flag platform |
 
 ## Documentation
 

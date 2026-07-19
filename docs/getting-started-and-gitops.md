@@ -4,9 +4,6 @@ This runbook is the verified, copy-pasteable Day-1 path for syncing config from
 a dedicated git repository. It is exercised end-to-end in CI on `kind`
 (`test/e2e`), so every command below is expected to work verbatim.
 
-New to Kohen? Start with **[What is Kohen](./intro.md)** for the pattern and
-when to use it.
-
 Kohen turns a path in a **dedicated git config repository** into the `ConfigMap`
 a workload consumes, wires that `ConfigMap` into the workload, and rolls the
 workload when the config changes. It is **not** a GitOps/CD engine — it composes
