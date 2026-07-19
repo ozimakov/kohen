@@ -1,7 +1,8 @@
 # Install Kohen
 
-Kohen ships as a Helm chart and as plain Kubernetes manifests generated from
-that chart. Both paths install the same operator.
+Kohen is a Kubernetes-native operator. It ships as a Helm chart and as plain
+Kubernetes manifests generated from that chart. Both paths install the same
+controller and CRDs.
 
 **Requirements:** Kubernetes 1.28+ (N-2 per SPEC T4; CI gates latest + one older
 minor), Helm 3.13+ (for Helm install).

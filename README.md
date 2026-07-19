@@ -1,10 +1,12 @@
 # Kohen
 
-Kohen is a Kubernetes operator for one pattern: **an application that consumes
-domain-specific configuration from a dedicated git repository**.
+Kohen is a **Kubernetes-native** operator for one pattern: **an application that
+consumes domain-specific configuration from a dedicated git repository**.
 
-Point a `ConfigSync` at a git path and a workload. Kohen renders a `ConfigMap`,
-mounts it, and rolls the workload when the config version changes.
+Point a `ConfigSync` at a git path and a workload. Kohen renders a native
+`ConfigMap`, mounts it with standard volume mechanics, wires referenced Secrets
+the same way, and rolls the workload when the config version changes — no
+sidecars, no private volumes.
 
 Deploy **what** runs with Argo CD / Flux; keep **config** in sync with Kohen.
 

@@ -135,11 +135,13 @@ should work: Package settings → Change visibility → Public
 
 ### Project site
 
-Published from [`site/`](../site/) to the `gh-pages` branch via
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml).
-Served at **https://kohen.zimakov.net/** (`site/CNAME`).
+Source lives on **`main`** under [`site/`](../site/). Published by
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) with
+`actions/deploy-pages` (no `gh-pages` branch). Served at
+**https://kohen.zimakov.net/** (`site/CNAME`).
 
 **One-time setup:**
-1. Settings → Pages → Source **Deploy from a branch** → branch **`gh-pages`** / root
+1. Settings → Pages → Source **GitHub Actions**
 2. DNS: `CNAME` record `kohen` → `ozimakov.github.io` (in the zimakov.net zone)
 3. After GitHub verifies the domain, enable **Enforce HTTPS**
+4. Optional: delete the legacy `gh-pages` branch if it still exists

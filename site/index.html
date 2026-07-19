@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kohen — config from a dedicated git repo</title>
-  <meta name="description" content="Kohen syncs domain-specific config from a dedicated git repository into Kubernetes workloads — ConfigMaps, secret wiring, and version-matched rollouts." />
+  <title>Kohen — Kubernetes-native config from a dedicated git repo</title>
+  <meta name="description" content="Kohen is a Kubernetes-native operator that syncs domain-specific config from a dedicated git repository into native ConfigMaps, Secret wiring, and version-matched rollouts." />
   <link rel="canonical" href="https://kohen.zimakov.net/" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -26,10 +26,10 @@
     <section class="hero" aria-label="Intro">
       <div class="hero-copy">
         <p class="brand">Kohen</p>
-        <h1>Config from a dedicated git repo</h1>
+        <h1>Kubernetes-native config from a dedicated git repo</h1>
         <p class="lede">
-          For apps that consume domain-specific config from their own config repository —
-          not the deployment repo. Kohen renders the path, mounts the ConfigMap, and rolls once when the version changes.
+          A cluster operator for apps that consume domain-specific config from their own config repository —
+          not the deployment repo. Kohen renders native ConfigMaps, wires Secrets with existing Kubernetes mechanics, and rolls once when the version changes.
         </p>
         <div class="cta-row">
           <a class="btn primary" href="docs.html#when">When to use it</a>
@@ -69,7 +69,8 @@
       <h2>The pattern</h2>
       <p>
         Keep domain and environment config in a dedicated git repo. Deploy the app with GitOps.
-        Kohen bridges the two: path → ConfigMap → mount → stamp → roll.
+        Kohen bridges the two as a Kubernetes-native control loop: path → ConfigMap → mount → stamp → roll —
+        no sidecars, no private volumes, no non-Kubernetes delivery path.
       </p>
       <pre class="diagram" aria-label="Config repo to workload flow">Config repo                     Deploy / GitOps
 (domain + env config)           (app manifests)
@@ -84,7 +85,7 @@
     <section class="strip alt" id="when">
       <h2>When to use it</h2>
       <p>
-        Use Kohen when a dedicated config repo should drive a workload's ConfigMap, secret wiring,
+        Use Kohen when a dedicated config repo should drive a workload's native ConfigMap, Secret wiring,
         and rollouts — especially alongside Argo CD or Flux. Skip it when GitOps already owns the
         ConfigMap from the same repo, or when you only need secrets or restart-on-change.
       </p>

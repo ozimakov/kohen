@@ -1,8 +1,11 @@
 # Concepts
 
-Kohen keeps a workload's **configuration** and **secret wiring** in sync with a
-path in a dedicated git repository — then rolls the workload when the version
-changes. For when (not) to use it, see the
+Kohen is a **Kubernetes-native** operator: a CRD + controller that keeps a
+workload's **configuration** and **secret wiring** in sync with a path in a
+dedicated git repository — then rolls the workload when the version changes.
+Delivery uses native cluster objects (`ConfigMap`, `Secret`, volume mounts,
+Server-Side Apply) rather than sidecars or a private volume protocol. For when
+(not) to use it, see the
 [README](../README.md#when-to-use-kohen--and-when-not).
 
 ## Core objects
